@@ -47,7 +47,14 @@ git clone https://github.com/YOURNAME/claude-speed && cd claude-speed
 ./install.sh --statusline   # 顺带接线 Claude Code statusline
 ```
 
-需要 Xcode Command Line Tools（`xcode-select --install`）和 python3。更新代码后重跑 `install.sh` 即可。
+需要 Xcode Command Line Tools（`xcode-select --install`）和 python3。
+
+**装完立刻能看到什么：菜单栏出现 `⚪` 图标**（闲置——还没有活跃会话）。随便开个 Claude Code 会话问点东西，几秒后变成 `🟢71` 这样的实时读数；带 `--statusline` 装的话，速度行会在 Claude Code 输入框下方随下次刷新出现——无需重启。如果什么都没出现，跑 `./collect.py`：它打印的就是菜单栏该显示的内容，排障入口。
+
+注意：
+- LaunchAgent 指向 clone 目录——clone 到哪都行，但之后**挪了目录要重跑 `install.sh`**；
+- `--statusline` 修改 `~/.claude/settings.json` 前会自动备份成 `.bak`；
+- **更新**：`git pull && ./install.sh`（幂等——重编译并重启）。
 
 **只用 statusline（任何平台，含 Linux）：** 在 `~/.claude/settings.json` 加：
 

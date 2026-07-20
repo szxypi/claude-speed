@@ -47,7 +47,14 @@ git clone https://github.com/YOURNAME/claude-speed && cd claude-speed
 ./install.sh --statusline   # + wire the Claude Code statusline
 ```
 
-Requires Xcode Command Line Tools (`xcode-select --install`) and python3. Re-run `install.sh` after updating.
+Requires Xcode Command Line Tools (`xcode-select --install`) and python3.
+
+**What to expect right after install:** a **⚪ icon appears in the menu bar** (idle — no active session yet). Ask Claude Code anything and within a few seconds it becomes a live reading like `🟢71`; with `--statusline`, the speed line appears under the Claude Code input box on its next refresh — no restart needed. If nothing shows up, run `./collect.py`: it prints exactly what the menu bar would display.
+
+Notes:
+- The LaunchAgent points into the cloned directory — clone it anywhere, but if you later **move the directory, re-run `install.sh`**.
+- `--statusline` backs up `~/.claude/settings.json` to `.bak` before editing.
+- **Update:** `git pull && ./install.sh` (idempotent — recompiles and restarts).
 
 **Statusline only (any platform, including Linux):** add to `~/.claude/settings.json`:
 
