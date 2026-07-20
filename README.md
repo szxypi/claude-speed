@@ -1,5 +1,7 @@
 # claude-speed
 
+![CI](https://github.com/YOURNAME/claude-speed/actions/workflows/ci.yml/badge.svg)
+
 **See Claude Code's real generation speed.** A macOS menu bar app + terminal statusline that separates the *true* tokens-per-second of your Claude Code responses from first-token latency — the number that actually fluctuates.
 
 [中文文档 →](README.zh.md)
@@ -105,6 +107,18 @@ launchctl kickstart -k gui/$(id -u)/com.claude-speed.menubar
 ```
 
 Tunables are constants at the top of both Python scripts (thresholds, windows, session count).
+
+## Development
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+36 tests cover the fitting math (known-truth recovery, outlier rejection, window
+expansion), end-to-end menu bar scenarios (waiting, errors, cold cache, two-stage
+fit), and a source-level AST check enforcing that the shared algorithm stays
+byte-identical between `collect.py` and `statusline-speed.py`. CI runs them on
+macOS and Linux plus a `swiftc` smoke build.
 
 ## License
 

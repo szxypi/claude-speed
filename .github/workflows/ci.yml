@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Python
+        run: python3 -m py_compile collect.py statusline-speed.py
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Compile Swift menubar app
+        run: swiftc -O -o ClaudeSpeed main.swift
+
+  # statusline 是跨平台的,Linux 上单独验证 Python 侧
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Python
+        run: python3 -m py_compile collect.py statusline-speed.py
+      - name: Unit tests
+        run: python3 -m unittest discover -s tests -v

@@ -1,5 +1,7 @@
 # claude-speed
 
+![CI](https://github.com/YOURNAME/claude-speed/actions/workflows/ci.yml/badge.svg)
+
 **看见 Claude Code 的真实生成速度。** macOS 菜单栏应用 + 终端 statusline，把回复的**真·生成速度（tok/s）**和**首字延迟（TTFT）**拆开显示——后者才是真正在波动的东西。
 
 [English docs →](README.md)
@@ -105,6 +107,17 @@ launchctl kickstart -k gui/$(id -u)/com.claude-speed.menubar
 ```
 
 阈值、窗口、会话数等可调参数都是两个 Python 脚本顶部的常量。
+
+## 开发
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+36 个测试覆盖:拟合数学(已知真值还原、离群剔除、扩窗)、菜单栏端到端场景
+(等待/错误/冷缓存/两阶段拟合)、以及一个 AST 级源码比对——强制共享算法在
+`collect.py` 与 `statusline-speed.py` 间保持逐字一致。CI 在 macOS + Linux
+跑测试,外加 `swiftc` 编译冒烟。
 
 ## License
 
