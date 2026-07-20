@@ -1,0 +1,3 @@
+# 编译产物:swiftc -O -o ClaudeSpeed main.swift 可重建(见 README 常用操作)
+ClaudeSpeed
+__pycache__/
