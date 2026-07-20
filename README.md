@@ -1,6 +1,6 @@
 # claude-speed
 
-![CI](https://github.com/YOURNAME/claude-speed/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/JuDaXia/claude-speed/actions/workflows/ci.yml/badge.svg)
 
 **See Claude Code's real generation speed.** A macOS menu bar app + terminal statusline that separates the *true* tokens-per-second of your Claude Code responses from first-token latency — the number that actually fluctuates.
 
@@ -45,7 +45,7 @@ Works with every Claude Code client (CLI, desktop app, VS Code extension) — th
 **Menu bar app (macOS):**
 
 ```bash
-git clone https://github.com/YOURNAME/claude-speed && cd claude-speed
+git clone https://github.com/JuDaXia/claude-speed && cd claude-speed
 ./install.sh                # menu bar app only
 ./install.sh --statusline   # + wire the Claude Code statusline
 ```

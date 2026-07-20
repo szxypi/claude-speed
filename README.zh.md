@@ -1,6 +1,6 @@
 # claude-speed
 
-![CI](https://github.com/YOURNAME/claude-speed/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/JuDaXia/claude-speed/actions/workflows/ci.yml/badge.svg)
 
 **看见 Claude Code 的真实生成速度。** macOS 菜单栏应用 + 终端 statusline，把回复的**真·生成速度（tok/s）**和**首字延迟（TTFT）**拆开显示——后者才是真正在波动的东西。
 
@@ -45,7 +45,7 @@ claude-speed 对近期响应拟合 `耗时 ≈ TTFT + token数/TPS`（Theil-Sen 
 **菜单栏应用（macOS）：**
 
 ```bash
-git clone https://github.com/YOURNAME/claude-speed && cd claude-speed
+git clone https://github.com/JuDaXia/claude-speed && cd claude-speed
 ./install.sh                # 只装菜单栏
 ./install.sh --statusline   # 顺带接线 Claude Code statusline
 ```
