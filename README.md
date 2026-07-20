@@ -8,12 +8,15 @@
 
 > Unofficial community tool. Not affiliated with Anthropic.
 
+![Menu bar with dropdown — true speed, first-token latency, last response size](assets/menubar.png)
+
+While a request is pending, the title counts the wait live — true speed 59 tok/s, waiting 8s for the first token:
+
+![Waiting indicator](assets/menubar-waiting.png)
+
 ```
-Menu bar:   ⚠️🟢71 ⏳8s          ← errors recently · 71 tok/s true speed · waiting 8s right now
 Statusline: Fable 5 | ⚡71 tok/s 首字4.2s | 最近1022tok·22s | ctx 70%
 ```
-
-<!-- TODO: add screenshots — assets/menubar.png, assets/statusline.png -->
 
 ## Why
 

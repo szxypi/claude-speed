@@ -8,12 +8,15 @@
 
 > 非官方社区工具，与 Anthropic 无关。
 
+![菜单栏与下拉明细——真实速度、首字延迟、最近响应规模](assets/menubar.png)
+
+请求发出后，标题会实时跳等待秒数——真速 59 tok/s、首字已等 8 秒：
+
+![实时等待指示](assets/menubar-waiting.png)
+
 ```
-菜单栏:      ⚠️🟢71 ⏳8s          ← 近期有错 · 真实速度 71 tok/s · 当前请求已等 8 秒
 statusline:  Fable 5 | ⚡71 tok/s 首字4.2s | 最近1022tok·22s | ctx 70%
 ```
-
-<!-- TODO: 补截图 — assets/menubar.png, assets/statusline.png -->
 
 ## 为什么做这个
 
