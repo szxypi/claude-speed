@@ -256,12 +256,12 @@ class TestScriptSync(unittest.TestCase):
 class TestCollectHelpers(unittest.TestCase):
     def test_project_label(self):
         cases = [
-            ("-Users-x-Documents-work-App--claude-worktrees-llm-api-concurrency-aec861",
-             "api-concurrency"),           # hex 尾段剥除
+            ("-Users-x-Documents-work-App--claude-worktrees-my-feature-branch-aec861",
+             "feature-branch"),            # hex 尾段剥除
             ("-Users-x-Documents-Proj-sdkimg-08ec45aa", "Proj-sdkimg"),
-            ("-Users-x-Documents-agent-worktrees-CLA-29", "CLA"),  # 短数字尾段剥除
+            ("-Users-x-Documents-agent-worktrees-XY-29", "XY"),  # 短数字尾段剥除
             ("-Users-x-tools-claude-speed", "claude-speed"),
-            ("-Users-x-Documents-claudecodePrj-20260521", "20260521"),  # 日期保留
+            ("-Users-x-Documents-someLongProjectName-20260521", "20260521"),  # 日期保留
             ("-private-tmpXXXX-neutral-cwd", "neutral-cwd"),
         ]
         for dirname, want in cases:
