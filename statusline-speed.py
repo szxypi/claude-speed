@@ -7,6 +7,7 @@
   用「组内最后时间戳 - 组前一条记录时间戳」近似该响应的端到端耗时(含 TTFT)。
   fit_speed 用 Theil-Sen 回归拆出纯生成速度与首字延迟,详见 README。
 """
+import glob
 import json
 import os
 import sys
@@ -22,7 +23,10 @@ FIT_MIN_SPAN = 150      # output token 跨度需 ≥ 此值,回归才有信息�
 FIT_MIN_PAIR_DX = 50    # Theil-Sen 只取 x 差 ≥ 此值的点对,避免小分母放大噪声
 FIT_WINDOW_START = 600  # 滑动窗口起步(秒):拟合优先用近期样本,不足自动倍增扩窗
 ERR_ROW_WINDOW = 1800   # 统计近 30 分钟的 API 错误数
-CACHE_OK = 0.9          # 缓存命中率 ≥ 此值视为常态,不显示
+CACHE_OK = 0.9          # 缓存命中率颜色阈值(绿档)
+AGENT_ACTIVE_WINDOW = 90   # 子代理文件在此窗口内有写入 → 视为活跃(在跑)
+AGENT_BURN_WINDOW = 120    # 后台吞吐统计窗口:近 N 秒产出 token 之和 / N
+AGENT_MAX_READ = 8         # 每轮最多读几个子代理文件(控 IO,其余只计数)
 
 
 def parse_ts(s):
@@ -173,6 +177,50 @@ def windowed_fit(groups, now):
         w *= 2
 
 
+def subagent_paths(transcript_path):
+    """主 transcript 路径 → 其子代理 transcript 列表,覆盖两种布局:
+    - Agent 工具:   <会话uuid>/subagents/agent-*.jsonl
+    - Workflow 编排: <会话uuid>/subagents/workflows/<runid>/agent-*.jsonl"""
+    if not transcript_path:
+        return []
+    stem = (transcript_path[:-6] if transcript_path.endswith(".jsonl")
+            else transcript_path)
+    sub = os.path.join(stem, "subagents")
+    return sorted(glob.glob(os.path.join(sub, "agent-*.jsonl")) +
+                  glob.glob(os.path.join(sub, "workflows", "*", "agent-*.jsonl")))
+
+
+def agent_metrics(paths, now):
+    """子代理聚合 → (活跃代理数, 后台总吞吐 Σtok/s, 可入池样本点)。
+
+    活跃 = 文件在 AGENT_ACTIVE_WINDOW 内有写入(生成中的代理会持续写)。
+    吞吐 = 活跃代理近 AGENT_BURN_WINDOW 内产出的 token / 窗口时长(舰队
+    燃烧率,含在途未完成的组;跨窗口的长响应按时间占比折算,不整组记入)。
+    样本点 = (model, out, dur),供两阶段拟合入池。每轮最多读
+    AGENT_MAX_READ 个最新文件控制 IO,超出的只计数不读——吞吐会相应低估。
+    """
+    stamped = []
+    for p in paths:
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        if now - mt <= AGENT_ACTIVE_WINDOW:
+            stamped.append((mt, p))
+    stamped.sort(reverse=True)
+    active, out_sum, pts = len(stamped), 0.0, []
+    for _, p in stamped[:AGENT_MAX_READ]:
+        groups, _ = response_groups(tail_lines(p))
+        for g in groups:
+            d = g["end"] - g["start"]
+            if d / g["out"] < MAX_SEC_PER_TOK:
+                pts.append((g.get("model"), g["out"], d))
+            if now - g["end"] <= AGENT_BURN_WINDOW:
+                frac = min(1.0, (g["end"] - max(g["start"], now - AGENT_BURN_WINDOW)) / d)
+                out_sum += g["out"] * frac
+    return active, out_sum / AGENT_BURN_WINDOW, pts
+
+
 def fmt_dur(ms):
     s = int(ms / 1000)
     return "%dm%02ds" % (s // 60, s % 60) if s >= 60 else "%ds" % s
@@ -214,12 +262,16 @@ def main():
             parts.append(seg)
         g = groups[-1]
         denom = g["inp"] + g["cr"] + g["cc"]
-        if denom > 0 and g["cr"] / denom < CACHE_OK:  # 常态(≥90%)不显示
+        if denom > 0:
             hit = 100.0 * g["cr"] / denom
-            hc = "33" if hit >= 50 else "31"
+            hc = "32" if hit >= 100 * CACHE_OK else ("33" if hit >= 50 else "31")
             parts.append("\033[%sm缓存%.0f%%%s\033[0m"
                          % (hc, hit, "冷" if g["cc"] > g["cr"] else ""))
         parts.append("最近%dtok·%.0fs" % (g["out"], g["end"] - g["start"]))
+
+    n_ag, burn, _ = agent_metrics(subagent_paths(info.get("transcript_path")), now)
+    if n_ag:  # 后台子代理在跑:代理数 + 舰队燃烧率
+        parts.append("\033[36m🤖%d Σ%.0ftok/s\033[0m" % (n_ag, burn))
 
     nerr = sum(1 for e in err_ts if now - e <= ERR_ROW_WINDOW)
     if nerr:

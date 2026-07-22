@@ -36,10 +36,12 @@ sl = load_module("cs_statusline", "statusline-speed.py")
 # 两脚本必须逐字一致的共享部分
 SHARED_FUNCS = ["parse_ts", "tail_lines", "response_groups",
                 "current_model_groups", "median", "clean_points",
-                "ts_slope", "fit_speed", "windowed_fit"]
+                "ts_slope", "fit_speed", "windowed_fit",
+                "subagent_paths", "agent_metrics"]
 SHARED_CONSTS = ["TAIL_BYTES", "MAX_SEC_PER_TOK", "FIT_MIN_SAMPLES",
                  "FIT_MIN_SPAN", "FIT_MIN_PAIR_DX", "FIT_WINDOW_START",
-                 "ERR_ROW_WINDOW", "CACHE_OK"]
+                 "ERR_ROW_WINDOW", "CACHE_OK", "AGENT_ACTIVE_WINDOW",
+                 "AGENT_BURN_WINDOW", "AGENT_MAX_READ"]
 
 
 # ---------- 合成 transcript 记录构造 ----------
@@ -172,6 +174,56 @@ class SharedAlgoMixin:
         (tps, _), span = self.m.windowed_fit(groups, now)
         self.assertAlmostEqual(tps, 70, delta=2)
         self.assertGreater(span, self.m.FIT_WINDOW_START)  # 扩窗才拟合成功
+
+    def test_subagent_paths_layout(self):
+        root = tempfile.mkdtemp()
+        main_p = os.path.join(root, "abc.jsonl")
+        subdir = os.path.join(root, "abc", "subagents")
+        os.makedirs(subdir)
+        ap = os.path.join(subdir, "agent-x1.jsonl")
+        open(ap, "w").close()
+        wfdir = os.path.join(subdir, "workflows", "wf_123")
+        os.makedirs(wfdir)
+        wp = os.path.join(wfdir, "agent-y2.jsonl")
+        open(wp, "w").close()
+        self.assertEqual(self.m.subagent_paths(main_p), [ap, wp])  # 两种布局都要
+        self.assertEqual(self.m.subagent_paths(None), [])
+
+    def test_agent_metrics_active_and_burn(self):
+        now = time.time()
+        root = tempfile.mkdtemp()
+
+        def agent(name, out, mtime):
+            p = os.path.join(root, name)
+            recs = [rec_u(now - 30), rec_a("a", now - 10, out)]
+            with open(p, "w") as f:
+                for r in recs:
+                    f.write(json.dumps(r) + "\n")
+            os.utime(p, (mtime, mtime))
+            return p
+
+        p1 = agent("agent-1.jsonl", 600, now - 5)    # 活跃,窗口内 600tok
+        p2 = agent("agent-2.jsonl", 600, now - 5)    # 活跃,窗口内 600tok
+        p3 = agent("agent-3.jsonl", 600, now - 600)  # mtime 过期 → 只当不存在
+        active, burn, pts = self.m.agent_metrics([p1, p2, p3], now)
+        self.assertEqual(active, 2)
+        self.assertAlmostEqual(burn, 1200 / self.m.AGENT_BURN_WINDOW, delta=0.01)
+        self.assertEqual(len(pts), 2)
+
+    def test_agent_burn_prorates_window_straddling_group(self):
+        # 240s 的长响应只有尾部 110s 落在燃烧窗口内:按时间占比折算,不整组记入
+        now = time.time()
+        root = tempfile.mkdtemp()
+        p = os.path.join(root, "agent-long.jsonl")
+        recs = [rec_u(now - 250), rec_a("a", now - 10, 600)]  # dur=240,0.4s/tok
+        with open(p, "w") as f:
+            for r in recs:
+                f.write(json.dumps(r) + "\n")
+        os.utime(p, (now - 5, now - 5))
+        _, burn, _ = self.m.agent_metrics([p], now)
+        w = self.m.AGENT_BURN_WINDOW
+        expect = 600 * ((now - 10) - (now - w)) / 240 / w  # 600×(110/240)/120
+        self.assertAlmostEqual(burn, expect, delta=0.05)
 
 
 class TestSharedCollect(SharedAlgoMixin, unittest.TestCase):
@@ -317,6 +369,60 @@ class TestCollectMain(unittest.TestCase):
         out = self.run_main()
         self.assertIn("冷", out)
 
+    def write_agents(self, dirname, n, out=600, mtime=None):
+        """给 write() 建的会话(s.jsonl)配 n 个子代理 transcript。"""
+        subdir = os.path.join(self.root, dirname, "s", "subagents")
+        os.makedirs(subdir, exist_ok=True)
+        for i in range(n):
+            p = os.path.join(subdir, "agent-%d.jsonl" % i)
+            recs = [rec_u(self.now - 30), rec_a("a%d" % i, self.now - 10, out)]
+            with open(p, "w") as f:
+                for r in recs:
+                    f.write(json.dumps(r) + "\n")
+            mt = mtime if mtime else self.now - 5
+            os.utime(p, (mt, mt))
+
+    def test_background_agents_shown(self):
+        self.write("-Users-x-proj-bg", make_session(self.now))
+        self.write_agents("-Users-x-proj-bg", 2)
+        out = self.run_main()
+        self.assertIn("🤖2·Σ10tok/s", out)  # 2×600tok/120s = 10
+        self.assertIn("🤖2", out.splitlines()[0])
+
+    def test_background_only_title_shows_fleet(self):
+        # 主链最后响应在 20+ 分钟前(超出标题窗口),但代理正在烧
+        self.write("-Users-x-proj-bgonly",
+                   make_session(self.now, start=self.now - 1900, gap=30))
+        self.write_agents("-Users-x-proj-bgonly", 3)
+        out = self.run_main()
+        self.assertTrue(out.splitlines()[0].startswith("🤖3 Σ"),
+                        "标题应为舰队状态,实际: " + out.splitlines()[0])
+
+    def test_stale_agents_not_counted(self):
+        self.write("-Users-x-proj-oldbg", make_session(self.now))
+        self.write_agents("-Users-x-proj-oldbg", 2, mtime=self.now - 600)
+        out = self.run_main()
+        self.assertNotIn("🤖", out)
+
+    def test_title_sums_agents_across_sessions(self):
+        # 标题舰队数 = 所有在榜会话合计(2+3=5),不是单一「最新会话」
+        self.write("-Users-x-proj-fleetA", make_session(self.now))
+        self.write_agents("-Users-x-proj-fleetA", 2)
+        self.write("-Users-x-proj-fleetB",
+                   make_session(self.now, start=self.now - 400))
+        self.write_agents("-Users-x-proj-fleetB", 3)
+        out = self.run_main()
+        self.assertIn("🤖5", out.splitlines()[0])
+
+    def test_silent_main_with_agents_row(self):
+        # 主链无任何成功响应、也不在等待态,但代理在烧 → 「后台任务运行中」
+        self.write("-Users-x-proj-silentbg", [rec_u(self.now - 300)])
+        self.write_agents("-Users-x-proj-silentbg", 2)
+        out = self.run_main()
+        self.assertIn("后台任务运行中", out)
+        self.assertIn("🤖2·Σ10tok/s", out)
+        self.assertTrue(out.splitlines()[0].startswith("🤖2 Σ"))
+
     def test_agent_transcripts_ignored(self):
         d = os.path.join(self.root, "-Users-x-proj-sub")
         os.makedirs(d)
@@ -355,6 +461,23 @@ class TestStatuslineMain(unittest.TestCase):
         self.assertIn("tok/s", out)
         self.assertIn("首字", out)
         self.assertIn("ctx 42%", out)
+
+    def test_renders_background_agents(self):
+        root = tempfile.mkdtemp()
+        now = time.time()
+        path = os.path.join(root, "sess.jsonl")
+        with open(path, "w") as f:
+            for r in make_session(now):
+                f.write(json.dumps(r) + "\n")
+        subdir = os.path.join(root, "sess", "subagents")
+        os.makedirs(subdir)
+        ap = os.path.join(subdir, "agent-1.jsonl")
+        with open(ap, "w") as f:
+            f.write(json.dumps(rec_u(now - 30)) + "\n")
+            f.write(json.dumps(rec_a("a", now - 10, 600)) + "\n")
+        out = self._run({"transcript_path": path})
+        self.assertIn("🤖1", out)
+        self.assertIn("Σ5tok/s", out)  # 600tok/120s
 
     def test_bad_stdin_degrades_gracefully(self):
         out = self._run(None)

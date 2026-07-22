@@ -80,6 +80,8 @@ Menu bar title — `[⚠️][lamp+speed][ ⏳Ns]`, e.g. `⚠️🟢71 ⏳8s`:
 | `⏳8s` (live) | A request has been waiting 8s with no response yet — counts up every 3s refresh; disappears after 120s (assumed interrupted) |
 | `⏳18s` (after a response) | Last fitted TTFT ≥ 12s warning |
 | `⚠️` | API errors in the last 5 minutes |
+| `🤖3` | 3 background subagents currently running (Task/research agents) |
+| `🤖3 Σ140` | Background-only mode: no foreground reading, fleet burning 140 tok/s total |
 
 Dropdown, one line per active session (up to 3, last 2 hours):
 
@@ -87,7 +89,7 @@ Dropdown, one line per active session (up to 3, last 2 hours):
 myproject·fable5  🟢 71 tok/s 首字4s  缓存12%冷  ⚠️1错  最近1022tok·22s  4秒前
 ```
 
-`首字Ns` = first-token latency · `·近N分` = fitting window when expanded beyond 10 min · `缓存N%` = prompt cache hit rate, shown only when <90% (explains TTFT spikes; `冷`= cache write > read) · `⚠️N错` = API errors in last 30 min · `最近Ntok·Ns` = last response size/time · display text is currently Chinese — PRs welcome.
+`首字Ns` = first-token latency · `·近N分` = fitting window when expanded beyond 10 min · `🤖N·Σtok/s` = N active background subagents and their combined burn rate · `缓存N%` = prompt cache hit rate of the last response (low values explain TTFT spikes; `冷`= cache write > read) · `⚠️N错` = API errors in last 30 min · `最近Ntok·Ns` = last response size/time · display text is currently Chinese — PRs welcome.
 
 Statusline colors: speed green ≥50 / yellow ≥30 / red <30 · TTFT green ≤5s / yellow ≤12s / red >12s · ctx yellow ≥60% / red ≥85%.
 
@@ -100,6 +102,7 @@ Statusline colors: speed green ≥50 / yellow ≥30 / red <30 · TTFT green ≤5
 - **Sliding window**: fitting prefers the last 10 minutes of samples (server load drifts); the window doubles until the fit succeeds, and the effective span is labeled `·近N分`.
 - **Two-stage fit**: with too few samples in one session, the slope (a model property) is borrowed from a cross-session pool; only the intercept (a session property) is fitted locally — new sessions show a speed after ~2 responses (`≈` marker).
 - **Honest fallbacks**: when even that fails, long replies (≥300 tok) give a blended speed shown as a lower bound `≥N` (green only if the bound itself clears the green threshold); otherwise "insufficient samples". Large transcripts are tail-read (400 KB); malformed lines are skipped silently.
+- **Background subagent monitoring**: research/Task agents write to `<session>/subagents/agent-*.jsonl` while the main transcript stays silent — a session's activity time is therefore `max(main transcript, newest subagent)`, so background work is never mistaken for idle. Agents with writes in the last 90s count as active; their combined output over the last 2 minutes gives the fleet burn rate (`🤖N Σtok/s`), and their response samples join the cross-session pool for two-stage fitting.
 
 ## Operations
 
@@ -124,11 +127,11 @@ Tunables are constants at the top of both Python scripts (thresholds, windows, s
 python3 -m unittest discover -s tests -v
 ```
 
-36 tests cover the fitting math (known-truth recovery, outlier rejection, window
+48 tests cover the fitting math (known-truth recovery, outlier rejection, window
 expansion), end-to-end menu bar scenarios (waiting, errors, cold cache, two-stage
-fit), and a source-level AST check enforcing that the shared algorithm stays
-byte-identical between `collect.py` and `statusline-speed.py`. CI runs them on
-macOS and Linux plus a `swiftc` smoke build.
+fit, background subagents and fleet burn proration), and a source-level AST check
+enforcing that the shared algorithm stays byte-identical between `collect.py` and
+`statusline-speed.py`. CI runs them on macOS and Linux plus a `swiftc` smoke build.
 
 ## License
 

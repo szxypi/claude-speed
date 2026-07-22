@@ -9,6 +9,7 @@
 纯生成速度(斜率倒数)与首字延迟(截距),详见 README。
 本文件额外做:多会话聚合、跨会话共享斜率(两阶段拟合)、实时等待指示。
 """
+import glob
 import json
 import os
 import time
@@ -31,7 +32,10 @@ WAIT_MIN = 3            # 最后记录是 user 且距今超过此秒数 → 正�
 WAIT_MAX = 120          # 等待超过此秒数视为请求已被中断,不再显示 ⏳
 ERR_TITLE_WINDOW = 300  # 最新会话近 5 分钟内有 API 错误 → 标题挂 ⚠️
 ERR_ROW_WINDOW = 1800   # 下拉行统计近 30 分钟的 API 错误数
-CACHE_OK = 0.9          # 缓存命中率 ≥ 此值视为常态,不显示
+CACHE_OK = 0.9          # 缓存命中率颜色阈值(statusline 绿档)
+AGENT_ACTIVE_WINDOW = 90   # 子代理文件在此窗口内有写入 → 视为活跃(在跑)
+AGENT_BURN_WINDOW = 120    # 后台吞吐统计窗口:近 N 秒产出 token 之和 / N
+AGENT_MAX_READ = 8         # 每轮最多读几个子代理文件(控 IO,其余只计数)
 
 
 def parse_ts(s):
@@ -209,7 +213,54 @@ def windowed_fit(groups, now):
         w *= 2
 
 
+def subagent_paths(transcript_path):
+    """主 transcript 路径 → 其子代理 transcript 列表,覆盖两种布局:
+    - Agent 工具:   <会话uuid>/subagents/agent-*.jsonl
+    - Workflow 编排: <会话uuid>/subagents/workflows/<runid>/agent-*.jsonl"""
+    if not transcript_path:
+        return []
+    stem = (transcript_path[:-6] if transcript_path.endswith(".jsonl")
+            else transcript_path)
+    sub = os.path.join(stem, "subagents")
+    return sorted(glob.glob(os.path.join(sub, "agent-*.jsonl")) +
+                  glob.glob(os.path.join(sub, "workflows", "*", "agent-*.jsonl")))
+
+
+def agent_metrics(paths, now):
+    """子代理聚合 → (活跃代理数, 后台总吞吐 Σtok/s, 可入池样本点)。
+
+    活跃 = 文件在 AGENT_ACTIVE_WINDOW 内有写入(生成中的代理会持续写)。
+    吞吐 = 活跃代理近 AGENT_BURN_WINDOW 内产出的 token / 窗口时长(舰队
+    燃烧率,含在途未完成的组;跨窗口的长响应按时间占比折算,不整组记入)。
+    样本点 = (model, out, dur),供两阶段拟合入池。每轮最多读
+    AGENT_MAX_READ 个最新文件控制 IO,超出的只计数不读——吞吐会相应低估。
+    """
+    stamped = []
+    for p in paths:
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        if now - mt <= AGENT_ACTIVE_WINDOW:
+            stamped.append((mt, p))
+    stamped.sort(reverse=True)
+    active, out_sum, pts = len(stamped), 0.0, []
+    for _, p in stamped[:AGENT_MAX_READ]:
+        groups, _ = response_groups(tail_lines(p))
+        for g in groups:
+            d = g["end"] - g["start"]
+            if d / g["out"] < MAX_SEC_PER_TOK:
+                pts.append((g.get("model"), g["out"], d))
+            if now - g["end"] <= AGENT_BURN_WINDOW:
+                frac = min(1.0, (g["end"] - max(g["start"], now - AGENT_BURN_WINDOW)) / d)
+                out_sum += g["out"] * frac
+    return active, out_sum / AGENT_BURN_WINDOW, pts
+
+
 def recent_files():
+    """近期活跃会话。活跃时间取 max(主transcript mtime, 最新子代理 mtime)——
+    后台任务跑着时主 transcript 静默,只看主文件会把正在烧的会话判成闲置/挤出榜。
+    返回 [(活跃时间, 主路径, 项目目录名, 子代理路径列表)]。"""
     now, found = time.time(), []
     try:
         dirs = list(os.scandir(ROOT))
@@ -223,17 +274,22 @@ def recent_files():
         except OSError:
             continue
         for f in entries:
-            # agent-*.jsonl 是子代理 transcript(当前布局在 <会话>/subagents/ 二级
-            # 目录,一级扫描本就不含;此处防御布局变化,避免子代理被当独立会话)
+            # agent-*.jsonl 是子代理 transcript,不当独立会话(经 subagent_paths 归属)
             if not f.name.endswith(".jsonl") or f.name.startswith("agent-"):
                 continue
             try:
-                mtime = f.stat().st_mtime
+                eff = f.stat().st_mtime
             except OSError:
                 continue
-            if now - mtime < SCAN_WINDOW:
-                found.append((mtime, f.path, d.name))
-    found.sort(reverse=True)
+            agents = subagent_paths(f.path)
+            for a in agents:
+                try:
+                    eff = max(eff, os.path.getmtime(a))
+                except OSError:
+                    continue
+            if now - eff < SCAN_WINDOW:
+                found.append((eff, f.path, d.name, agents))
+    found.sort(key=lambda t: t[0], reverse=True)
     return found[:MAX_SESSIONS]
 
 
@@ -280,50 +336,55 @@ def main():
     # ---- 扫描:每会话解析一次尾部,同时汇集跨会话共享斜率的点池 ----
     sessions = []
     pool = {}  # model -> [(out,dur)]:TPS 是模型属性,跨会话同构,可共享斜率
-    for mtime, path, dname in recent_files():
+    for mtime, path, dname, agent_paths in recent_files():
         lines = tail_lines(path)
         groups, err_ts = response_groups(lines)
         ltype, lts = last_record_info(lines)
         wait = None  # 实时等待:最后一条是 user 记录(含 tool_result)且迟迟无响应
         if ltype == "user" and lts and WAIT_MIN < now - lts <= WAIT_MAX:
             wait = int(now - lts)
-        # 无成功响应组的会话,只要在等待或近期有 API 错误也要保留——
-        # 「首轮连续报错、一条成功响应都没有」正是最需要 ⚠️ 的时刻
+        n_ag, burn, apts = agent_metrics(agent_paths, now)
+        # 无成功响应组的会话,在等待/近期有错/后台代理在跑时也要保留——
+        # 否则「主会话静默、子代理在烧」的后台任务会被判成闲置
         has_err = any(now - e <= ERR_ROW_WINDOW for e in err_ts)
-        if not groups and wait is None and not has_err:
+        if not groups and wait is None and not has_err and not n_ag:
             continue
         for g in groups:
             d = g["end"] - g["start"]
             if d / g["out"] < MAX_SEC_PER_TOK:
                 pool.setdefault(g.get("model"), []).append((g["out"], d))
+        for mdl, out, d in apts:  # 子代理响应与主链同构,并入同模型点池
+            pool.setdefault(mdl, []).append((out, d))
         sessions.append({"mtime": mtime, "label": project_label(dname),
-                         "groups": groups, "err_ts": err_ts, "wait": wait})
+                         "groups": groups, "err_ts": err_ts, "wait": wait,
+                         "agents": (n_ag, burn)})
 
     # ---- 每会话拟合:自身滑窗拟合 → 全局斜率+会话截距(两阶段) → 下界近似 ----
     rows = []
     for s in sessions:
         groups = s["groups"]
-        if not groups:  # 新会话首个响应还没回来,只有等待信息
+        if not groups:  # 主链还没有成功响应:只有等待/错误/后台代理信息
             rows.append({"end": s["mtime"], "mtime": s["mtime"], "fit": None,
                          "glob": False, "win": None, "wait": s["wait"],
                          "err_ts": s["err_ts"], "label": s["label"],
-                         "model": "", "last": None})
+                         "model": "", "last": None, "agents": s["agents"]})
             continue
         g = groups[-1]
         mg = current_model_groups(groups)
         fit, win = windowed_fit(mg, now)
-        glob = False
+        borrowed = False  # 注意别用 glob 当变量名,会遮蔽 glob 模块
         if fit is None or fit[1] is None:
             # 两阶段:斜率借同模型跨会话点池,截距(TTFT)用本会话残差中位
             b = ts_slope(pool.get(mg[-1].get("model")) or [])
             pts = clean_points(mg)
             if b is not None and len(pts) >= 2:
                 fit = (1.0 / b, max(0.0, median([y - b * x for x, y in pts])))
-                win, glob = None, True
+                win, borrowed = None, True
         rows.append({"end": g["end"], "mtime": s["mtime"], "fit": fit,
-                     "glob": glob, "win": win, "wait": s["wait"],
+                     "glob": borrowed, "win": win, "wait": s["wait"],
                      "err_ts": s["err_ts"], "label": s["label"],
-                     "model": model_tag(g.get("model")), "last": g})
+                     "model": model_tag(g.get("model")), "last": g,
+                     "agents": s["agents"]})
     rows.sort(key=lambda r: r["end"], reverse=True)
 
     # ---- 标题:⚠️(近期错误)+ 速度灯 + ⏳(实时等待优先,其次已完成响应的高首字) ----
@@ -344,8 +405,17 @@ def main():
                 if waiting else "")
     err_flag = "⚠️" if any(now - e <= ERR_TITLE_WINDOW
                            for r in rows for e in r["err_ts"]) else ""
-    parts_t = [p for p in (speed_seg, live_seg or ttft_seg) if p]
-    print(err_flag + " ".join(parts_t) if parts_t else (err_flag + "⚪" if err_flag else "⚪"))
+    # 舰队口径与 ⚠️/⏳ 一致:聚合所有在榜会话,避免「谁的 mtime 最新」的瞬时竞态
+    n_ag = sum(r["agents"][0] for r in rows)
+    burn = sum(r["agents"][1] for r in rows)
+    if speed_seg or live_seg or ttft_seg:
+        ag_seg = "🤖%d" % n_ag if n_ag else ""
+        parts_t = [p for p in (speed_seg, live_seg or ttft_seg, ag_seg) if p]
+        print(err_flag + " ".join(parts_t))
+    elif n_ag:  # 前台无读数、后台在烧:标题只显舰队状态
+        print(err_flag + "🤖%d Σ%.0f" % (n_ag, burn))
+    else:
+        print(err_flag + "⚪" if err_flag else "⚪")
 
     # ---- 下拉明细 ----
     for r in rows:
@@ -357,6 +427,8 @@ def main():
                 # 「首个」只对真·新会话(无任何历史响应)成立,否则与「最近Ntok」矛盾
                 segs.append("⏳ 等待%s响应 %d秒"
                             % ("首个" if r["last"] is None else "", r["wait"]))
+            elif r["last"] is None and r["agents"][0]:
+                segs.append("后台任务运行中")  # 主链无响应,速度看 🤖 段
             elif r["last"] is None:
                 segs.append("🔴 无成功响应")  # 全错会话:groups 空,靠 ⚠️N错 说明原因
             else:
@@ -370,10 +442,13 @@ def main():
             if r["win"] and r["win"] > FIT_WINDOW_START:
                 seg += "·近%d分" % round(r["win"] / 60)
             segs.append(seg)
+        n_ag, burn = r["agents"]
+        if n_ag:
+            segs.append("🤖%d·Σ%.0ftok/s" % (n_ag, burn))
         g = r["last"]
         if g:
             denom = g["inp"] + g["cr"] + g["cc"]
-            if denom > 0 and g["cr"] / denom < CACHE_OK:  # 常态(≥90%)不显示
+            if denom > 0:
                 seg = "缓存%d%%" % round(100 * g["cr"] / denom)
                 if g["cc"] > g["cr"]:
                     seg += "冷"
