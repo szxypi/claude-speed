@@ -10,9 +10,7 @@
 
 ![Menu bar with dropdown — true speed, first-token latency, last response size](assets/menubar.png)
 
-While a request is pending, the title counts the wait live — true speed 59 tok/s, waiting 8s for the first token:
-
-![Waiting indicator](assets/menubar-waiting.png)
+While a request is pending, the dropdown counts the wait live (`⏳等8秒`) — the title itself stays minimal.
 
 ```
 Statusline: Fable 5 | ⚡71 tok/s 首字4.2s | 最近1022tok·22s | ctx 70%
@@ -69,7 +67,7 @@ Notes:
 
 ## Reading the display
 
-Menu bar title — `[⚠️][lamp+speed][ ⏳Ns]`, e.g. `⚠️🟢71 ⏳8s`:
+Menu bar title — `[⚠️][lamp+speed][ 🤖N]`, e.g. `⚠️🟢71 🤖3`:
 
 | Symbol | Meaning |
 |---|---|
@@ -77,13 +75,13 @@ Menu bar title — `[⚠️][lamp+speed][ ⏳Ns]`, e.g. `⚠️🟢71 ⏳8s`:
 | `≈70` | Slope borrowed from other sessions of the same model (two-stage fit — new session, few samples yet) |
 | `≥50` | Lower-bound estimate (not enough samples to split TTFT; true speed is at least this) |
 | `⚪` | Idle (no response in 10 min) or speed uncertain |
-| `⏳8s` (live) | A request has been waiting 8s with no response yet — counts up every 3s refresh; disappears after 120s (assumed interrupted) |
-| `⏳18s` (after a response) | Last fitted TTFT ≥ 12s warning |
 | `⚠️` | API errors in the last 5 minutes |
 | `🤖3` | 3 background subagents currently running (Task/research agents) |
 | `🤖3 Σ140` | Background-only mode: no foreground reading, fleet burning 140 tok/s total |
 
-Dropdown, one line per active session (up to 3, last 2 hours):
+The title stays minimal by design — waiting indicators live in the dropdown only: `⏳等N秒` counts up while a request is pending (disappears after 120s, assumed interrupted), and sessions with no response yet show `等待首个响应`.
+
+Dropdown, one line per active session (up to 4, last 2 hours, **Claude Code and Codex CLI merged**):
 
 ```
 myproject·fable5  🟢 71 tok/s 首字4s  缓存12%冷  ⚠️1错  最近1022tok·22s  4秒前
@@ -103,6 +101,7 @@ Statusline colors: speed green ≥50 / yellow ≥30 / red <30 · TTFT green ≤5
 - **Two-stage fit**: with too few samples in one session, the slope (a model property) is borrowed from a cross-session pool; only the intercept (a session property) is fitted locally — new sessions show a speed after ~2 responses (`≈` marker).
 - **Honest fallbacks**: when even that fails, long replies (≥300 tok) give a blended speed shown as a lower bound `≥N` (green only if the bound itself clears the green threshold); otherwise "insufficient samples". Large transcripts are tail-read (400 KB); malformed lines are skipped silently.
 - **Background subagent monitoring**: research/Task agents write to `<session>/subagents/agent-*.jsonl` while the main transcript stays silent — a session's activity time is therefore `max(main transcript, newest subagent)`, so background work is never mistaken for idle. Agents with writes in the last 90s count as active; their combined output over the last 2 minutes gives the fleet burn rate (`🤖N Σtok/s`), and their response samples join the cross-session pool for two-stage fitting.
+- **Codex CLI support** (menu bar only): Codex sessions live in `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Each API response streams content records and is closed by a `token_count` event carrying full usage. Group start = timestamp of the record preceding the first content record (includes TTFT, same semantics as Claude); group end = the **last content record**, not the `token_count` event — that fires after tool execution and would inflate generation time. Model comes from `turn_context`, project label from `session_meta.cwd`, cache hit from `cached_input_tokens/input_tokens`. Everything downstream (fitting, windows, display) is reused as-is. Sessions with stale content are excluded even if the file was recently touched.
 
 ## Operations
 
@@ -127,7 +126,7 @@ Tunables are constants at the top of both Python scripts (thresholds, windows, s
 python3 -m unittest discover -s tests -v
 ```
 
-48 tests cover the fitting math (known-truth recovery, outlier rejection, window
+62 tests cover the fitting math (known-truth recovery, outlier rejection, window
 expansion), end-to-end menu bar scenarios (waiting, errors, cold cache, two-stage
 fit, background subagents and fleet burn proration), and a source-level AST check
 enforcing that the shared algorithm stays byte-identical between `collect.py` and

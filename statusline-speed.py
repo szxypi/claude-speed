@@ -18,6 +18,7 @@ TAIL_BYTES = 400_000  # transcript 可达几十 MB,只读尾部足够覆盖最�
 
 # 速度拆分参数(见 fit_speed,与 collect.py 完全一致)
 MAX_SEC_PER_TOK = 0.5   # dur/out>0.5s(<2tok/s)的组基本掺了「发消息前的停顿」,剔除
+MAX_TPS = 400           # TPS 合理上限:拟合接受域与样本过快界共用(见 plausible_point)
 FIT_MIN_SAMPLES = 5     # 拆分所需最少有效响应数
 FIT_MIN_SPAN = 150      # output token 跨度需 ≥ 此值,回归才有信息量
 FIT_MIN_PAIR_DX = 50    # Theil-Sen 只取 x 差 ≥ 此值的点对,避免小分母放大噪声
@@ -112,10 +113,18 @@ def median(xs):
     return xs[len(xs) // 2]
 
 
+def plausible_point(out, dur):
+    """样本点合理性(双侧):过慢 = 掺入「发消息前停顿」的离群组;
+    过快 = 时间戳坍缩的「瞬时组」——导入/云同步的 Codex 会话会把成批记录
+    写成毫秒级时间差,数千 token 挂在 0.001s 上,足以污染 Theil-Sen 中位。
+    过快界与拟合接受域上限(MAX_TPS)一致。"""
+    return dur / out < MAX_SEC_PER_TOK and out / dur <= MAX_TPS
+
+
 def clean_points(groups):
-    """组 → (out, dur) 点集,剔除掺入「发消息前停顿」的离群组。"""
+    """组 → (out, dur) 点集,剔除不合理样本(见 plausible_point)。"""
     return [(g["out"], g["end"] - g["start"]) for g in groups
-            if (g["end"] - g["start"]) / g["out"] < MAX_SEC_PER_TOK]
+            if plausible_point(g["out"], g["end"] - g["start"])]
 
 
 def ts_slope(pts):
@@ -131,7 +140,7 @@ def ts_slope(pts):
     if len(slopes) < 3:
         return None
     b = median(slopes)
-    if b <= 0 or not 3 <= 1.0 / b <= 400:
+    if b <= 0 or not 3 <= 1.0 / b <= MAX_TPS:
         return None
     return b
 
@@ -213,7 +222,7 @@ def agent_metrics(paths, now):
         groups, _ = response_groups(tail_lines(p))
         for g in groups:
             d = g["end"] - g["start"]
-            if d / g["out"] < MAX_SEC_PER_TOK:
+            if plausible_point(g["out"], d):
                 pts.append((g.get("model"), g["out"], d))
             if now - g["end"] <= AGENT_BURN_WINDOW:
                 frac = min(1.0, (g["end"] - max(g["start"], now - AGENT_BURN_WINDOW)) / d)

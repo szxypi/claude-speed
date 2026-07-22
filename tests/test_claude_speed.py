@@ -35,13 +35,13 @@ sl = load_module("cs_statusline", "statusline-speed.py")
 
 # 两脚本必须逐字一致的共享部分
 SHARED_FUNCS = ["parse_ts", "tail_lines", "response_groups",
-                "current_model_groups", "median", "clean_points",
-                "ts_slope", "fit_speed", "windowed_fit",
+                "current_model_groups", "median", "plausible_point",
+                "clean_points", "ts_slope", "fit_speed", "windowed_fit",
                 "subagent_paths", "agent_metrics"]
 SHARED_CONSTS = ["TAIL_BYTES", "MAX_SEC_PER_TOK", "FIT_MIN_SAMPLES",
                  "FIT_MIN_SPAN", "FIT_MIN_PAIR_DX", "FIT_WINDOW_START",
                  "ERR_ROW_WINDOW", "CACHE_OK", "AGENT_ACTIVE_WINDOW",
-                 "AGENT_BURN_WINDOW", "AGENT_MAX_READ"]
+                 "AGENT_BURN_WINDOW", "AGENT_MAX_READ", "MAX_TPS"]
 
 
 # ---------- 合成 transcript 记录构造 ----------
@@ -175,6 +175,17 @@ class SharedAlgoMixin:
         self.assertAlmostEqual(tps, 70, delta=2)
         self.assertGreater(span, self.m.FIT_WINDOW_START)  # 扩窗才拟合成功
 
+    def test_instant_group_rejected(self):
+        # 时间戳坍缩的「瞬时组」(毫秒级 dur 挂几千 token,见于导入/云同步的
+        # Codex 会话)必须被样本过滤剔除,否则污染拟合与跨会话点池
+        now = time.time()
+        recs = make_session(now)
+        recs += [rec_u(now - 20), rec_a("mz", now - 19.999, 4380)]
+        groups, _ = self.m.response_groups(jlines(recs))
+        self.assertEqual(len(self.m.clean_points(groups)), 5)  # 瞬时组不在内
+        self.assertFalse(self.m.plausible_point(4380, 0.001))
+        self.assertTrue(self.m.plausible_point(600, 10.0))
+
     def test_subagent_paths_layout(self):
         root = tempfile.mkdtemp()
         main_p = os.path.join(root, "abc.jsonl")
@@ -251,6 +262,40 @@ class TestScriptSync(unittest.TestCase):
                              "共享常量 %s 在两脚本中不一致" % name)
 
 
+# ---------- Codex rollout 合成记录构造 ----------
+
+def cx(t, typ, ptyp=None, **payload):
+    r = {"timestamp": iso(t), "type": typ}
+    if ptyp is not None:
+        payload["type"] = ptyp
+    if payload:
+        r["payload"] = payload
+    return r
+
+
+def cx_tc(t, out, inp=10000, cached=9000, cw=100):
+    return cx(t, "event_msg", "token_count",
+              info={"last_token_usage": {
+                  "input_tokens": inp, "cached_input_tokens": cached,
+                  "cache_write_input_tokens": cw, "output_tokens": out}})
+
+
+def cx_session(now, tps=70.0, ttft=5.0, outs=(100, 400, 800, 1500, 2500),
+               start=None, gap=60, model="gpt-5.6-sol", cwd="/Users/x/myproj"):
+    """构造已知真值的 Codex 会话:每条响应 dur = ttft + out/tps。"""
+    t = start if start is not None else now - 600
+    recs = [cx(t - 1, "session_meta", None, cwd=cwd),
+            cx(t - 1, "turn_context", None, model=model)]
+    for out in outs:
+        recs.append(cx(t, "event_msg", "user_message"))          # 触发(锚点)
+        recs.append(cx(t + 0.5, "response_item", "reasoning"))   # 首条内容
+        end = t + ttft + out / tps
+        recs.append(cx(end, "event_msg", "agent_message"))       # 末条内容(组end)
+        recs.append(cx_tc(end + 0.8, out))                       # usage 收尾
+        t += gap
+    return recs
+
+
 # ---------- collect.py 独有函数 ----------
 
 class TestCollectHelpers(unittest.TestCase):
@@ -271,7 +316,94 @@ class TestCollectHelpers(unittest.TestCase):
         self.assertEqual(cs.model_tag("claude-opus-4-8"), "opus4.8")
         self.assertEqual(cs.model_tag("claude-fable-5"), "fable5")
         self.assertEqual(cs.model_tag("claude-haiku-4-5-20251001"), "haiku4.5")
+        self.assertEqual(cs.model_tag("gpt-5.6-sol"), "gpt5.6sol")
         self.assertEqual(cs.model_tag(None), "")
+
+
+class TestCodexParse(unittest.TestCase):
+    def test_recovers_known_speed(self):
+        now = time.time()
+        groups, err_ts, label, trig = cs.codex_parse(
+            jlines(cx_session(now, tps=70, ttft=5)))
+        self.assertEqual(label, "myproj")
+        self.assertEqual(len(groups), 5)
+        self.assertEqual(groups[-1]["model"], "gpt-5.6-sol")
+        tps, ttft = cs.fit_speed(groups)
+        self.assertAlmostEqual(tps, 70, delta=2)
+        self.assertAlmostEqual(ttft, 5, delta=0.5)
+
+    def test_usage_mapping_and_cache(self):
+        now = time.time()
+        groups, _, _, _ = cs.codex_parse(jlines(cx_session(now, outs=(500,))))
+        g = groups[0]
+        self.assertEqual(g["inp"], 1000)   # input(10000) − cached(9000)
+        self.assertEqual(g["cr"], 9000)
+        self.assertEqual(g["cc"], 100)
+
+    def test_end_anchor_is_last_content_not_token_count(self):
+        # token_count 在工具执行后才发出:组 end 必须取最后一条内容记录
+        now = time.time()
+        recs = [cx(now - 30, "event_msg", "user_message"),
+                cx(now - 25, "response_item", "reasoning"),
+                cx(now - 20, "response_item", "custom_tool_call"),   # 末条内容
+                cx(now - 10, "response_item", "custom_tool_call_output"),  # 工具跑了10s
+                cx_tc(now - 9.9, 300)]
+        groups, _, _, _ = cs.codex_parse(jlines(recs))
+        self.assertEqual(len(groups), 1)
+        self.assertAlmostEqual(groups[0]["end"], now - 20, delta=0.01)
+        self.assertAlmostEqual(groups[0]["start"], now - 30, delta=0.01)
+
+    def test_developer_message_not_content(self):
+        # role=developer/user 的 message 是输入,不该开组
+        now = time.time()
+        recs = [cx(now - 30, "event_msg", "user_message"),
+                cx(now - 29, "response_item", "message", role="developer"),
+                cx(now - 25, "response_item", "message", role="assistant"),
+                cx_tc(now - 24, 200)]
+        groups, _, _, _ = cs.codex_parse(jlines(recs))
+        self.assertEqual(len(groups), 1)
+        # 锚点应是 developer message(组前一条),而非更早的 user_message
+        self.assertAlmostEqual(groups[0]["start"], now - 29, delta=0.01)
+
+    def test_unclosed_turn_discarded_at_boundary(self):
+        # 轮1没有 token_count 收尾 → 轮2的 user_message 应丢弃残组,
+        # 不得把两轮合并成一个「含用户思考时间」的假慢组
+        now = time.time()
+        recs = [cx(now - 300, "event_msg", "user_message"),
+                cx(now - 299, "response_item", "reasoning"),
+                cx(now - 296, "event_msg", "agent_message"),   # 轮1无收尾
+                cx(now - 190, "event_msg", "user_message"),    # 轮2边界
+                cx(now - 189, "response_item", "reasoning"),
+                cx(now - 185, "event_msg", "agent_message"),
+                cx_tc(now - 184.5, 400)]
+        groups, _, _, _ = cs.codex_parse(jlines(recs))
+        self.assertEqual(len(groups), 1)
+        self.assertAlmostEqual(groups[0]["start"], now - 190, delta=0.01)
+        self.assertAlmostEqual(groups[0]["end"], now - 185, delta=0.01)
+
+    def test_model_fallback_sentinel(self):
+        # 尾读截掉 turn_context 时 model 未知 → 哨兵 "codex",不与 None 混池
+        now = time.time()
+        recs = [cx(now - 30, "event_msg", "user_message"),
+                cx(now - 25, "response_item", "reasoning"),
+                cx_tc(now - 24, 200)]
+        groups, _, _, _ = cs.codex_parse(jlines(recs))
+        self.assertEqual(groups[0]["model"], "codex")
+
+    def test_waiting_trigger_cleared_by_content_and_completion(self):
+        now = time.time()
+        base = [cx(now - 60, "event_msg", "user_message"),
+                cx(now - 55, "response_item", "reasoning"),
+                cx_tc(now - 50, 100)]
+        # 尾部是触发记录 → 等待中
+        _, _, _, trig = cs.codex_parse(jlines(
+            base + [cx(now - 8, "event_msg", "user_message")]))
+        self.assertAlmostEqual(trig, now - 8, delta=0.01)
+        # task_complete 清零
+        _, _, _, trig = cs.codex_parse(jlines(
+            base + [cx(now - 8, "event_msg", "user_message"),
+                    cx(now - 7, "event_msg", "task_complete")]))
+        self.assertIsNone(trig)
 
 
 # ---------- collect.main 端到端合成场景 ----------
@@ -279,12 +411,13 @@ class TestCollectHelpers(unittest.TestCase):
 class TestCollectMain(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
-        self._old_root = cs.ROOT
-        cs.ROOT = self.root
+        self.codex_root = tempfile.mkdtemp()  # 隔离,防真实 ~/.codex 漏进测试
+        self._old_root, self._old_codex = cs.ROOT, cs.CODEX_ROOT
+        cs.ROOT, cs.CODEX_ROOT = self.root, self.codex_root
         self.now = time.time()
 
     def tearDown(self):
-        cs.ROOT = self._old_root
+        cs.ROOT, cs.CODEX_ROOT = self._old_root, self._old_codex
 
     def write(self, dirname, recs, mtime=None):
         d = os.path.join(self.root, dirname)
@@ -328,7 +461,7 @@ class TestCollectMain(unittest.TestCase):
     def test_realtime_waiting_new_session(self):
         self.write("-Users-x-proj-fresh", [rec_u(self.now - 9)], mtime=self.now - 9)
         out = self.run_main()
-        self.assertIn("⏳", out.splitlines()[0])
+        self.assertNotIn("⏳", out.splitlines()[0])  # 等待只进下拉,不占图标栏
         self.assertIn("等待首个响应", out)
 
     def test_waiting_with_history_says_not_first(self):
@@ -350,7 +483,8 @@ class TestCollectMain(unittest.TestCase):
                    [rec_u(self.now - 9), rec_att(self.now - 8.9)],
                    mtime=self.now - 9)
         out = self.run_main()
-        self.assertIn("⏳", out.splitlines()[0])
+        self.assertIn("等待首个响应", out)  # 行内可见;图标栏不再显示 ⏳
+        self.assertNotIn("⏳", out.splitlines()[0])
 
     def test_all_error_session_surfaces_warning(self):
         recs = [rec_u(self.now - 200), rec_err(self.now - 190),
@@ -422,6 +556,52 @@ class TestCollectMain(unittest.TestCase):
         self.assertIn("后台任务运行中", out)
         self.assertIn("🤖2·Σ10tok/s", out)
         self.assertTrue(out.splitlines()[0].startswith("🤖2 Σ"))
+
+    def write_codex(self, fname, recs, mtime=None):
+        d = os.path.join(self.codex_root, "2026", "07", "22")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, fname)
+        with open(p, "w") as f:
+            for r in recs:
+                f.write(json.dumps(r) + "\n")
+        if mtime:
+            os.utime(p, (mtime, mtime))
+
+    def test_codex_session_rendered(self):
+        self.write_codex("rollout-x.jsonl", cx_session(self.now, tps=90, ttft=4))
+        out = self.run_main()
+        self.assertIn("myproj·gpt5.6sol", out)
+        self.assertIn("🟢", out)
+        self.assertIn("tok/s", out)
+        self.assertIn("首字", out)
+
+    def test_codex_and_claude_merged(self):
+        self.write("-Users-x-proj-claude", make_session(self.now))
+        self.write_codex("rollout-y.jsonl", cx_session(self.now, start=self.now - 500))
+        out = self.run_main()
+        self.assertIn("proj-claude·fable5", out)
+        self.assertIn("myproj·gpt5.6sol", out)
+
+    def test_zombie_session_excluded(self):
+        # 文件 mtime 很新(被后台进程碰过),但最后响应在窗口外 → 不入榜
+        old = make_session(self.now, start=self.now - 3 * 3600, gap=30)
+        self.write("-Users-x-proj-zombie", old, mtime=self.now - 60)
+        out = self.run_main()
+        self.assertIn("近2小时无 Claude 响应", out)
+
+    def test_codex_zombie_excluded(self):
+        # Codex 侧同样适用僵尸过滤:文件 mtime 新、内容陈旧 → 不入榜
+        stale = cx_session(self.now, start=self.now - 3 * 3600, gap=30)
+        self.write_codex("rollout-z.jsonl", stale, mtime=self.now - 60)
+        out = self.run_main()
+        self.assertIn("近2小时无 Claude 响应", out)
+
+    def test_codex_waiting_row(self):
+        recs = cx_session(self.now, outs=(300,), start=self.now - 200)
+        recs.append(cx(self.now - 10, "event_msg", "user_message"))
+        self.write_codex("rollout-w.jsonl", recs, mtime=self.now - 10)
+        out = self.run_main()
+        self.assertIn("⏳等10秒", out)  # 有历史响应:速度段照常,等待作附加段
 
     def test_agent_transcripts_ignored(self):
         d = os.path.join(self.root, "-Users-x-proj-sub")

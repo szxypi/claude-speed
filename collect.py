@@ -18,16 +18,17 @@ from datetime import datetime
 ROOT = os.path.expanduser("~/.claude/projects")
 SCAN_WINDOW = 2 * 3600  # 下拉列出近 2 小时内有写入的会话
 TITLE_WINDOW = 10 * 60  # 最新响应超过 10 分钟,标题速度位显示为闲置
-MAX_SESSIONS = 3        # 下拉最多列几个会话
+MAX_SESSIONS = 4        # 下拉最多列几个会话(Claude 与 Codex 合并后取最活跃的)
 TAIL_BYTES = 400_000
+CODEX_ROOT = os.path.expanduser("~/.codex/sessions")  # Codex CLI 会话目录
 
 # 速度拆分参数(见 fit_speed,与 statusline-speed.py 完全一致)
 MAX_SEC_PER_TOK = 0.5   # dur/out>0.5s(<2tok/s)的组基本掺了「发消息前的停顿」,剔除
+MAX_TPS = 400           # TPS 合理上限:拟合接受域与样本过快界共用(见 plausible_point)
 FIT_MIN_SAMPLES = 5     # 拆分所需最少有效响应数
 FIT_MIN_SPAN = 150      # output token 跨度需 ≥ 此值,回归才有信息量
 FIT_MIN_PAIR_DX = 50    # Theil-Sen 只取 x 差 ≥ 此值的点对,避免小分母放大噪声
 FIT_WINDOW_START = 600  # 滑动窗口起步(秒):拟合优先用近期样本,不足自动倍增扩窗
-TTFT_WARN = 12          # 首字延迟告警阈值(秒),与 statusline 红档一致
 WAIT_MIN = 3            # 最后记录是 user 且距今超过此秒数 → 正在等待响应
 WAIT_MAX = 120          # 等待超过此秒数视为请求已被中断,不再显示 ⏳
 ERR_TITLE_WINDOW = 300  # 最新会话近 5 分钟内有 API 错误 → 标题挂 ⚠️
@@ -132,15 +133,19 @@ def current_model_groups(groups):
 
 
 def model_tag(mid):
-    """'claude-opus-4-8'→'opus4.8'  'claude-fable-5'→'fable5'  未知格式原样截短。"""
-    parts = (mid or "").split("-")
-    if parts and parts[0] == "claude":
-        parts = parts[1:]
-    if not parts or not parts[0]:
+    """'claude-opus-4-8'→'opus4.8'  'claude-fable-5'→'fable5'
+    非 claude 系(如 Codex 的 'gpt-5.6-sol'→'gpt5.6sol')去连字符截短。"""
+    parts = [p for p in (mid or "").split("-") if p]
+    if not parts:
         return ""
-    nums = [x for x in parts[1:] if x.isdigit() and len(x) <= 2]
-    return parts[0] + (nums[0] + ("." + nums[1] if len(nums) > 1 else "")
-                       if nums else "")
+    if parts[0] == "claude":
+        parts = parts[1:]
+        if not parts:
+            return ""
+        nums = [x for x in parts[1:] if x.isdigit() and len(x) <= 2]
+        return parts[0] + (nums[0] + ("." + nums[1] if len(nums) > 1 else "")
+                           if nums else "")
+    return "".join(parts)[:12]
 
 
 def median(xs):
@@ -148,10 +153,18 @@ def median(xs):
     return xs[len(xs) // 2]
 
 
+def plausible_point(out, dur):
+    """样本点合理性(双侧):过慢 = 掺入「发消息前停顿」的离群组;
+    过快 = 时间戳坍缩的「瞬时组」——导入/云同步的 Codex 会话会把成批记录
+    写成毫秒级时间差,数千 token 挂在 0.001s 上,足以污染 Theil-Sen 中位。
+    过快界与拟合接受域上限(MAX_TPS)一致。"""
+    return dur / out < MAX_SEC_PER_TOK and out / dur <= MAX_TPS
+
+
 def clean_points(groups):
-    """组 → (out, dur) 点集,剔除掺入「发消息前停顿」的离群组。"""
+    """组 → (out, dur) 点集,剔除不合理样本(见 plausible_point)。"""
     return [(g["out"], g["end"] - g["start"]) for g in groups
-            if (g["end"] - g["start"]) / g["out"] < MAX_SEC_PER_TOK]
+            if plausible_point(g["out"], g["end"] - g["start"])]
 
 
 def ts_slope(pts):
@@ -167,7 +180,7 @@ def ts_slope(pts):
     if len(slopes) < 3:
         return None
     b = median(slopes)
-    if b <= 0 or not 3 <= 1.0 / b <= 400:
+    if b <= 0 or not 3 <= 1.0 / b <= MAX_TPS:
         return None
     return b
 
@@ -249,7 +262,7 @@ def agent_metrics(paths, now):
         groups, _ = response_groups(tail_lines(p))
         for g in groups:
             d = g["end"] - g["start"]
-            if d / g["out"] < MAX_SEC_PER_TOK:
+            if plausible_point(g["out"], d):
                 pts.append((g.get("model"), g["out"], d))
             if now - g["end"] <= AGENT_BURN_WINDOW:
                 frac = min(1.0, (g["end"] - max(g["start"], now - AGENT_BURN_WINDOW)) / d)
@@ -320,6 +333,102 @@ def project_label(dirname):
     return parts[-1]
 
 
+# ---- Codex CLI 数据源(仅 collect;statusline 是 Claude Code 的 UI,够不着 Codex) ----
+
+# rollout 记录里属于「模型生成内容」的 payload 类型:属于在途响应的一部分。
+# 其余类型(user_message/tool输出/token_count/turn_context...)只当时间锚点。
+CODEX_CONTENT_RI = {"reasoning", "message", "custom_tool_call", "function_call",
+                    "web_search_call", "local_shell_call"}
+CODEX_CONTENT_EM = {"agent_reasoning", "agent_reasoning_delta", "agent_message"}
+CODEX_TRIGGER_EM = {"user_message", "task_started"}
+
+
+def codex_parse(lines):
+    """解析 Codex rollout JSONL → (groups, err_ts, label, last_trigger_ts)。
+
+    组语义与 response_groups 对齐:连续的内容记录 = 一次在途响应,
+    `token_count` 事件收尾并提供 usage。锚点规则:
+    - start = 组第一条内容记录的前一条记录时间戳(触发它的 user/tool 输出,含 TTFT);
+    - end = 最后一条内容记录的时间戳——不能用 token_count 的:它在工具执行完
+      之后才发出,会把工具耗时算进生成时间。
+    usage 映射:inp=input−cached(与 Claude 的「非缓存输入」口径一致)、
+    cr=cached、cc=cache_write。模型来自最近的 turn_context,标签来自
+    session_meta.cwd。last_trigger_ts 供等待检测(内容一到就清零,
+    task_complete 也清零)。
+    """
+    groups, err_ts = [], []
+    cur, last_ts = None, None
+    model, label, last_trigger_ts = None, "", None
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        ts = parse_ts(r.get("timestamp"))
+        t, p = r.get("type"), r.get("payload") or {}
+        pt = p.get("type")
+        if t == "session_meta" and p.get("cwd"):
+            label = os.path.basename(str(p["cwd"]).rstrip("/")) or label
+        elif t == "turn_context" and p.get("model"):
+            model = p["model"]
+        is_content = ts and (
+            (t == "response_item" and pt in CODEX_CONTENT_RI
+             and not (pt == "message" and p.get("role") != "assistant"))
+            or (t == "event_msg" and pt in CODEX_CONTENT_EM))
+        if is_content:
+            if cur is None:
+                cur = {"start": last_ts, "end": ts}
+            else:
+                cur["end"] = ts
+            last_trigger_ts = None
+        elif t == "event_msg" and pt == "token_count":
+            u = (p.get("info") or {}).get("last_token_usage") or {}
+            out = u.get("output_tokens") or 0
+            if cur and cur["start"] and out:
+                cr = u.get("cached_input_tokens") or 0
+                # 大文件尾读可能不含稀疏的 turn_context → model 未知时用
+                # "codex" 哨兵:显示上有归属,两阶段点池也不会与 Claude 的
+                # 无模型旧格式(None)混池
+                groups.append({"id": None, "start": cur["start"],
+                               "end": cur["end"], "out": out,
+                               "model": model or "codex",
+                               "inp": max(0, (u.get("input_tokens") or 0) - cr),
+                               "cr": cr,
+                               "cc": u.get("cache_write_input_tokens") or 0})
+            cur = None
+        elif t == "event_msg" and pt in ("error", "stream_error"):
+            if ts:
+                err_ts.append(ts)
+        elif ts and t == "event_msg" and pt in CODEX_TRIGGER_EM:
+            # 真·轮次边界(用户消息/任务开始):未被 token_count 收尾的残组直接
+            # 丢弃——否则下一轮内容会并进同一组,把用户思考时间算进耗时,
+            # 拟合出「大 dur 中等 out」的假慢点
+            cur = None
+            last_trigger_ts = ts
+        elif ts and t == "response_item" and pt == "custom_tool_call_output":
+            last_trigger_ts = ts  # 轮内触发(工具输出):组保持开放,工具耗时由 end 锚点排除
+        elif t == "event_msg" and pt == "task_complete":
+            last_trigger_ts = None
+        if ts:
+            last_ts = ts
+    return ([g for g in groups if g["start"] and g["end"] > g["start"]],
+            err_ts, label, last_trigger_ts)
+
+
+def codex_recent_files():
+    """近期活跃的 Codex 会话(布局 sessions/YYYY/MM/DD/rollout-*.jsonl)。"""
+    now, found = time.time(), []
+    for p in glob.glob(os.path.join(CODEX_ROOT, "*", "*", "*", "rollout-*.jsonl")):
+        try:
+            mt = os.path.getmtime(p)
+        except OSError:
+            continue
+        if now - mt < SCAN_WINDOW:
+            found.append((mt, p))
+    found.sort(reverse=True)
+    return found[:MAX_SESSIONS]
+
+
 def fmt_ago(sec):
     return "%d分" % (sec // 60) if sec >= 60 else "%d秒" % sec
 
@@ -344,20 +453,44 @@ def main():
         if ltype == "user" and lts and WAIT_MIN < now - lts <= WAIT_MAX:
             wait = int(now - lts)
         n_ag, burn, apts = agent_metrics(agent_paths, now)
-        # 无成功响应组的会话,在等待/近期有错/后台代理在跑时也要保留——
-        # 否则「主会话静默、子代理在烧」的后台任务会被判成闲置
+        # 入榜需有窗口内的实质活动:近期响应 / 等待中 / 近期错误 / 代理在跑。
+        # 只按文件 mtime 会放进「文件被碰过但最后响应在几天前」的僵尸会话
+        # (如后台 claude -p 追加了非响应记录),显示成「N千分钟前」还挤占名额。
+        has_recent = bool(groups) and now - groups[-1]["end"] < SCAN_WINDOW
         has_err = any(now - e <= ERR_ROW_WINDOW for e in err_ts)
-        if not groups and wait is None and not has_err and not n_ag:
+        if not has_recent and wait is None and not has_err and not n_ag:
             continue
         for g in groups:
             d = g["end"] - g["start"]
-            if d / g["out"] < MAX_SEC_PER_TOK:
+            if plausible_point(g["out"], d):
                 pool.setdefault(g.get("model"), []).append((g["out"], d))
         for mdl, out, d in apts:  # 子代理响应与主链同构,并入同模型点池
             pool.setdefault(mdl, []).append((out, d))
         sessions.append({"mtime": mtime, "label": project_label(dname),
                          "groups": groups, "err_ts": err_ts, "wait": wait,
                          "agents": (n_ag, burn)})
+
+    # ---- Codex 会话:解析出同构的组,下游流水线全部复用 ----
+    for mtime, path in codex_recent_files():
+        groups, err_ts, label, trig_ts = codex_parse(tail_lines(path))
+        wait = None
+        if trig_ts and WAIT_MIN < now - trig_ts <= WAIT_MAX:
+            wait = int(now - trig_ts)
+        has_recent = bool(groups) and now - groups[-1]["end"] < SCAN_WINDOW
+        has_err = any(now - e <= ERR_ROW_WINDOW for e in err_ts)
+        if not has_recent and wait is None and not has_err:
+            continue
+        for g in groups:
+            d = g["end"] - g["start"]
+            if plausible_point(g["out"], d):
+                pool.setdefault(g.get("model"), []).append((g["out"], d))
+        sessions.append({"mtime": mtime, "label": (label or "codex")[:16],
+                         "groups": groups, "err_ts": err_ts, "wait": wait,
+                         "agents": (0, 0.0)})
+
+    # 两源合并后按活跃时间取最活跃的 MAX_SESSIONS 个
+    sessions.sort(key=lambda s: s["mtime"], reverse=True)
+    sessions = sessions[:MAX_SESSIONS]
 
     # ---- 每会话拟合:自身滑窗拟合 → 全局斜率+会话截距(两阶段) → 下界近似 ----
     rows = []
@@ -387,8 +520,9 @@ def main():
                      "agents": s["agents"]})
     rows.sort(key=lambda r: r["end"], reverse=True)
 
-    # ---- 标题:⚠️(近期错误)+ 速度灯 + ⏳(实时等待优先,其次已完成响应的高首字) ----
-    speed_seg, ttft_seg = "", ""
+    # ---- 标题:⚠️(近期错误)+ 速度灯 + 🤖(后台舰队) ----
+    # 等待/高首字的 ⏳ 只进下拉,不占图标栏(用户偏好:标题保持最简)
+    speed_seg = ""
     for r in rows:
         if r["fit"] is not None and now - r["end"] < TITLE_WINDOW:
             tps, ttft = r["fit"]
@@ -397,21 +531,14 @@ def main():
                 speed_seg = "🟢≥%.0f" % tps if tps >= 50 else "⚪≥%.0f" % tps
             else:
                 speed_seg = "%s%s%.0f" % (lamp(tps), "≈" if r["glob"] else "", tps)
-                if ttft >= TTFT_WARN:
-                    ttft_seg = "⏳%.0fs" % ttft
             break
-    waiting = [r for r in rows if r["wait"] is not None]
-    live_seg = ("⏳%ds" % max(waiting, key=lambda r: r["mtime"])["wait"]
-                if waiting else "")
     err_flag = "⚠️" if any(now - e <= ERR_TITLE_WINDOW
                            for r in rows for e in r["err_ts"]) else ""
-    # 舰队口径与 ⚠️/⏳ 一致:聚合所有在榜会话,避免「谁的 mtime 最新」的瞬时竞态
+    # 舰队口径与 ⚠️ 一致:聚合所有在榜会话,避免「谁的 mtime 最新」的瞬时竞态
     n_ag = sum(r["agents"][0] for r in rows)
     burn = sum(r["agents"][1] for r in rows)
-    if speed_seg or live_seg or ttft_seg:
-        ag_seg = "🤖%d" % n_ag if n_ag else ""
-        parts_t = [p for p in (speed_seg, live_seg or ttft_seg, ag_seg) if p]
-        print(err_flag + " ".join(parts_t))
+    if speed_seg:
+        print(err_flag + speed_seg + (" 🤖%d" % n_ag if n_ag else ""))
     elif n_ag:  # 前台无读数、后台在烧:标题只显舰队状态
         print(err_flag + "🤖%d Σ%.0f" % (n_ag, burn))
     else:
