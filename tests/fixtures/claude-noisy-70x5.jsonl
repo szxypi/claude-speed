@@ -1,0 +1,16 @@
+{"type": "user", "timestamp": "2026-01-01T00:00:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:07.271429Z", "message": {"id": "n0", "model": "claude-fable-5", "usage": {"output_tokens": 110, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:01:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:08.214286Z", "message": {"id": "n1", "model": "claude-fable-5", "usage": {"output_tokens": 260, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:02:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:02:12.728571Z", "message": {"id": "n2", "model": "claude-fable-5", "usage": {"output_tokens": 520, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:03:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:03:16.771429Z", "message": {"id": "n3", "model": "claude-fable-5", "usage": {"output_tokens": 880, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:04:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:04:24.885714Z", "message": {"id": "n4", "model": "claude-fable-5", "usage": {"output_tokens": 1350, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:05:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:05:31.742857Z", "message": {"id": "n5", "model": "claude-fable-5", "usage": {"output_tokens": 1900, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:06:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:06:41.614286Z", "message": {"id": "n6", "model": "claude-fable-5", "usage": {"output_tokens": 2500, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:07:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:07:48.685714Z", "message": {"id": "n7", "model": "claude-fable-5", "usage": {"output_tokens": 3100, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}

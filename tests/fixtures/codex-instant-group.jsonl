@@ -1,0 +1,30 @@
+{"timestamp": "2025-12-31T23:59:59Z", "type": "session_meta", "payload": {"cwd": "/Users/x/proj"}}
+{"timestamp": "2025-12-31T23:59:59Z", "type": "turn_context", "payload": {"model": "gpt-5.6-sol"}}
+{"timestamp": "2026-01-01T00:00:00Z", "type": "event_msg", "payload": {"type": "user_message"}}
+{"timestamp": "2026-01-01T00:00:00.500000Z", "type": "response_item", "payload": {"type": "reasoning"}}
+{"timestamp": "2026-01-01T00:00:05.666667Z", "type": "event_msg", "payload": {"type": "agent_message"}}
+{"timestamp": "2026-01-01T00:00:06.466667Z", "type": "event_msg", "payload": {"info": {"last_token_usage": {"input_tokens": 10000, "cached_input_tokens": 9000, "cache_write_input_tokens": 100, "output_tokens": 150}}, "type": "token_count"}}
+{"timestamp": "2026-01-01T00:01:30Z", "type": "event_msg", "payload": {"type": "user_message"}}
+{"timestamp": "2026-01-01T00:01:30.500000Z", "type": "response_item", "payload": {"type": "reasoning"}}
+{"timestamp": "2026-01-01T00:01:38.444444Z", "type": "event_msg", "payload": {"type": "agent_message"}}
+{"timestamp": "2026-01-01T00:01:39.244444Z", "type": "event_msg", "payload": {"info": {"last_token_usage": {"input_tokens": 10000, "cached_input_tokens": 9000, "cache_write_input_tokens": 100, "output_tokens": 400}}, "type": "token_count"}}
+{"timestamp": "2026-01-01T00:03:00Z", "type": "event_msg", "payload": {"type": "user_message"}}
+{"timestamp": "2026-01-01T00:03:00.500000Z", "type": "response_item", "payload": {"type": "reasoning"}}
+{"timestamp": "2026-01-01T00:03:12.888889Z", "type": "event_msg", "payload": {"type": "agent_message"}}
+{"timestamp": "2026-01-01T00:03:13.688889Z", "type": "event_msg", "payload": {"info": {"last_token_usage": {"input_tokens": 10000, "cached_input_tokens": 9000, "cache_write_input_tokens": 100, "output_tokens": 800}}, "type": "token_count"}}
+{"timestamp": "2026-01-01T00:04:30Z", "type": "event_msg", "payload": {"type": "user_message"}}
+{"timestamp": "2026-01-01T00:04:30.500000Z", "type": "response_item", "payload": {"type": "reasoning"}}
+{"timestamp": "2026-01-01T00:04:49.555556Z", "type": "event_msg", "payload": {"type": "agent_message"}}
+{"timestamp": "2026-01-01T00:04:50.355556Z", "type": "event_msg", "payload": {"info": {"last_token_usage": {"input_tokens": 10000, "cached_input_tokens": 9000, "cache_write_input_tokens": 100, "output_tokens": 1400}}, "type": "token_count"}}
+{"timestamp": "2026-01-01T00:06:00Z", "type": "event_msg", "payload": {"type": "user_message"}}
+{"timestamp": "2026-01-01T00:06:00.500000Z", "type": "response_item", "payload": {"type": "reasoning"}}
+{"timestamp": "2026-01-01T00:06:28.444444Z", "type": "event_msg", "payload": {"type": "agent_message"}}
+{"timestamp": "2026-01-01T00:06:29.244444Z", "type": "event_msg", "payload": {"info": {"last_token_usage": {"input_tokens": 10000, "cached_input_tokens": 9000, "cache_write_input_tokens": 100, "output_tokens": 2200}}, "type": "token_count"}}
+{"timestamp": "2026-01-01T00:07:30Z", "type": "event_msg", "payload": {"type": "user_message"}}
+{"timestamp": "2026-01-01T00:07:30.500000Z", "type": "response_item", "payload": {"type": "reasoning"}}
+{"timestamp": "2026-01-01T00:08:07.333333Z", "type": "event_msg", "payload": {"type": "agent_message"}}
+{"timestamp": "2026-01-01T00:08:08.133333Z", "type": "event_msg", "payload": {"info": {"last_token_usage": {"input_tokens": 10000, "cached_input_tokens": 9000, "cache_write_input_tokens": 100, "output_tokens": 3000}}, "type": "token_count"}}
+{"timestamp": "2026-01-01T00:11:40Z", "type": "event_msg", "payload": {"type": "user_message"}}
+{"timestamp": "2026-01-01T00:11:40.000500Z", "type": "response_item", "payload": {"type": "reasoning"}}
+{"timestamp": "2026-01-01T00:11:40.001000Z", "type": "event_msg", "payload": {"type": "agent_message"}}
+{"timestamp": "2026-01-01T00:11:40.001500Z", "type": "event_msg", "payload": {"info": {"last_token_usage": {"input_tokens": 10000, "cached_input_tokens": 9000, "cache_write_input_tokens": 100, "output_tokens": 2000}}, "type": "token_count"}}

@@ -1,0 +1,12 @@
+{"type": "user", "timestamp": "2026-01-01T00:00:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:10.666667Z", "message": {"id": "m0", "model": "claude-fable-5", "usage": {"output_tokens": 120, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:01:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:15.777778Z", "message": {"id": "m1", "model": "claude-fable-5", "usage": {"output_tokens": 350, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:02:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:02:23.555556Z", "message": {"id": "m2", "model": "claude-fable-5", "usage": {"output_tokens": 700, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:03:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:03:34.666667Z", "message": {"id": "m3", "model": "claude-fable-5", "usage": {"output_tokens": 1200, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:04:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:04:52.444444Z", "message": {"id": "m4", "model": "claude-fable-5", "usage": {"output_tokens": 2000, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}
+{"type": "user", "timestamp": "2026-01-01T00:05:00Z"}
+{"type": "assistant", "timestamp": "2026-01-01T00:06:14.666667Z", "message": {"id": "m5", "model": "claude-fable-5", "usage": {"output_tokens": 3000, "input_tokens": 100, "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 50}}}

@@ -120,13 +120,22 @@ launchctl kickstart -k gui/$(id -u)/com.claude-speed.menubar
 
 阈值、窗口、会话数等可调参数都是两个 Python 脚本顶部的常量。
 
+## 测量标准
+
+显示的速度是**估计值**、非绝对读数,其基准会随算法演进而漂移——所以定义被钉死。
+[METRIC.md](METRIC.md) 是带版本号的规范(当前 v1.0):速度的定义、锚点规则、估计器、
+全部参数。`tests/fixtures/*.jsonl` 是冻结的 transcript 字节(千克原器),`tests/golden.json`
+是它们的认证读数。每次 CI 都断言估计器仍能复现这些读数(**漂移**——任何移动了数字的
+代码改动都会让测试变红),并且仍能还原每个合成夹具的已知真值(**校准**——拦截有偏的重定标)。
+改基准是刻意行为:跑 `regen_golden.py`、review `golden.json` 的 diff、升版本号、写明漂移幅度。
+
 ## 开发
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-62 个测试覆盖:拟合数学(已知真值还原、离群剔除、扩窗)、菜单栏端到端场景
+65 个测试覆盖:拟合数学(已知真值还原、离群剔除、扩窗)、菜单栏端到端场景
 (等待/错误/冷缓存/两阶段拟合/后台子代理与燃烧率折算)、以及一个 AST 级源码
 比对——强制共享算法在 `collect.py` 与 `statusline-speed.py` 间保持逐字一致。
 CI 在 macOS + Linux 跑测试,外加 `swiftc` 编译冒烟。

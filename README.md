@@ -120,13 +120,26 @@ launchctl kickstart -k gui/$(id -u)/com.claude-speed.menubar
 
 Tunables are constants at the top of both Python scripts (thresholds, windows, session count).
 
+## Measurement standard
+
+The displayed speed is an *estimate*, not an absolute reading, and its basis can
+drift as the algorithm evolves — so the definition is pinned. [METRIC.md](METRIC.md)
+is the versioned spec (currently v1.0): what "speed" means, the anchor rules, the
+estimator, and every parameter. `tests/fixtures/*.jsonl` are frozen transcript
+bytes (the physical standard); `tests/golden.json` is their certified reading.
+Every CI run asserts the estimator still reproduces those readings (**drift** — a
+code change that moves the number turns the suite red) *and* still recovers each
+synthetic fixture's known ground truth (**calibration** — guards against a biased
+recalibration). Changing the basis is deliberate: run `regen_golden.py`, review
+the `golden.json` diff, bump the version, and document the shift.
+
 ## Development
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-62 tests cover the fitting math (known-truth recovery, outlier rejection, window
+65 tests cover the fitting math (known-truth recovery, outlier rejection, window
 expansion), end-to-end menu bar scenarios (waiting, errors, cold cache, two-stage
 fit, background subagents and fleet burn proration), and a source-level AST check
 enforcing that the shared algorithm stays byte-identical between `collect.py` and
