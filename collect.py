@@ -21,6 +21,10 @@ TITLE_WINDOW = 10 * 60  # 最新响应超过 10 分钟,标题速度位显示为�
 MAX_SESSIONS = 4        # 下拉最多列几个会话(Claude 与 Codex 合并后取最活跃的)
 TAIL_BYTES = 400_000
 CODEX_ROOT = os.path.expanduser("~/.codex/sessions")  # Codex CLI 会话目录
+# Kimi Code 会话目录(数据根可用 KIMI_CODE_HOME 重定位,见官方 data-locations 文档)
+KIMI_ROOT = os.path.join(
+    os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code"),
+    "sessions")
 
 # 速度拆分参数(见 fit_speed,与 statusline-speed.py 完全一致)
 MAX_SEC_PER_TOK = 0.5   # dur/out>0.5s(<2tok/s)的组基本掺了「发消息前的停顿」,剔除
@@ -239,7 +243,7 @@ def subagent_paths(transcript_path):
                   glob.glob(os.path.join(sub, "workflows", "*", "agent-*.jsonl")))
 
 
-def agent_metrics(paths, now):
+def agent_metrics(paths, now, parse=None):
     """子代理聚合 → (活跃代理数, 后台总吞吐 Σtok/s, 可入池样本点)。
 
     活跃 = 文件在 AGENT_ACTIVE_WINDOW 内有写入(生成中的代理会持续写)。
@@ -247,6 +251,7 @@ def agent_metrics(paths, now):
     燃烧率,含在途未完成的组;跨窗口的长响应按时间占比折算,不整组记入)。
     样本点 = (model, out, dur),供两阶段拟合入池。每轮最多读
     AGENT_MAX_READ 个最新文件控制 IO,超出的只计数不读——吞吐会相应低估。
+    parse = lines→groups 提取器,默认 Claude transcript;Kimi 子代理传 wire 解析。
     """
     stamped = []
     for p in paths:
@@ -259,7 +264,7 @@ def agent_metrics(paths, now):
     stamped.sort(reverse=True)
     active, out_sum, pts = len(stamped), 0.0, []
     for _, p in stamped[:AGENT_MAX_READ]:
-        groups, _ = response_groups(tail_lines(p))
+        groups = parse(tail_lines(p)) if parse else response_groups(tail_lines(p))[0]
         for g in groups:
             d = g["end"] - g["start"]
             if plausible_point(g["out"], d):
@@ -429,6 +434,131 @@ def codex_recent_files():
     return found[:MAX_SESSIONS]
 
 
+# ---- Kimi Code 数据源(仅 collect;wire.jsonl 是未文档化内部格式,解析须防御) ----
+
+
+def kimi_ts(v):
+    """wire 记录的 time 字段是 epoch 毫秒字符串。"""
+    try:
+        return float(v) / 1000
+    except (TypeError, ValueError):
+        return None
+
+
+def kimi_parse(lines):
+    """解析 Kimi Code wire.jsonl → (groups, err_ts, last_trigger_ts)。
+
+    组语义与 response_groups 对齐:一次 API 响应 = llm.request → 紧随的
+    step.end 配对。锚点规则:
+    - start = llm.request.time(请求发出时刻,语义同 Claude 的「组前一条记录」);
+    - end = step.end.time(响应完整消费,端到端含 TTFT)。
+    重试(服务端错误后重新请求):新的 llm.request 到来时丢弃未闭合的旧
+    request,锚点取重试时刻——同 Claude 的错误锚点哲学。
+    usage 映射:inp=inputOther、cr=inputCacheRead、cc=inputCacheCreation
+    (与 Claude 的非缓存输入/缓存读/缓存写一一对应)。模型取 llm.request.model
+    (如 "k3"),与 Claude/Codex 的模型名不撞池。
+    err_ts:错误记录格式未实测到,防御性收集任何 type 含 error 的记录。
+    last_trigger_ts:尾部是 turn.prompt/llm.request(已发请求、首个内容
+    尚未返回)时置位,供等待检测;内容一到或 step.end 落地即清零。
+    """
+    groups, err_ts = [], []
+    cur, last_trigger_ts = None, None
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        t, ts = r.get("type"), kimi_ts(r.get("time"))
+        et = (r.get("event") or {}).get("type") if t == "context.append_loop_event" else None
+        if t == "llm.request":
+            cur = {"start": ts, "model": r.get("model") or "kimi"}
+            if ts:
+                last_trigger_ts = ts
+        elif t == "turn.prompt":
+            if ts:
+                last_trigger_ts = ts
+        elif et == "step.end":
+            u = (r.get("event") or {}).get("usage") or {}
+            out = u.get("output") or 0
+            if cur and cur["start"] and ts and out:
+                groups.append({"id": (r.get("event") or {}).get("messageId"),
+                               "start": cur["start"], "end": ts, "out": out,
+                               "model": cur["model"],
+                               "inp": u.get("inputOther") or 0,
+                               "cr": u.get("inputCacheRead") or 0,
+                               "cc": u.get("inputCacheCreation") or 0})
+            cur = None
+            last_trigger_ts = None
+        elif et == "content.part":
+            last_trigger_ts = None  # 首个返回内容到达 → 不再算「等待首字」
+        if ts and ("error" in str(t).lower() or "error" in str(et).lower()):
+            err_ts.append(ts)
+    return ([g for g in groups if g["end"] > g["start"]],
+            err_ts, last_trigger_ts)
+
+
+def kimi_agent_paths(session_dir):
+    """Kimi 子代理 wire:<sessionDir>/agents/agent-*/wire.jsonl(平铺布局)。"""
+    return sorted(glob.glob(os.path.join(session_dir, "agents",
+                                         "agent-*", "wire.jsonl")))
+
+
+def kimi_session_labels():
+    """session_index.jsonl → {sessionDir: 项目短标签}(workDir 的 basename)。"""
+    labels = {}
+    try:
+        with open(os.path.join(os.path.dirname(KIMI_ROOT),
+                               "session_index.jsonl")) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                sd, wd = r.get("sessionDir"), r.get("workDir")
+                if sd and wd:
+                    labels[sd] = os.path.basename(str(wd).rstrip("/"))
+    except OSError:
+        pass
+    return labels
+
+
+def kimi_recent_files():
+    """近期活跃的 Kimi Code 会话(布局 sessions/<wd_key>/<sessionId>/agents/main/wire.jsonl)。
+    活跃时间取 max(主 wire, 最新子代理 wire)——同 Claude 的 recent_files:
+    后台子代理跑着时主 wire 静默,只看主文件会把在烧的会话判成闲置。
+    返回 [(活跃时间, 主 wire 路径, 会话目录, 子代理路径列表)]。"""
+    now, found = time.time(), []
+    for p in glob.glob(os.path.join(KIMI_ROOT, "*", "*",
+                                    "agents", "main", "wire.jsonl")):
+        try:
+            eff = os.path.getmtime(p)
+        except OSError:
+            continue
+        sdir = os.path.dirname(os.path.dirname(os.path.dirname(p)))
+        agents = kimi_agent_paths(sdir)
+        for a in agents:
+            try:
+                eff = max(eff, os.path.getmtime(a))
+            except OSError:
+                continue
+        if now - eff < SCAN_WINDOW:
+            found.append((eff, p, sdir, agents))
+    found.sort(key=lambda t: t[0], reverse=True)
+    return found[:MAX_SESSIONS]
+
+
+def kimi_label_fallback(sdir):
+    """session_index 缺失时从 workDirKey 目录名推标签:wd_<slug>_<hash12> → slug。"""
+    key = os.path.basename(os.path.dirname(sdir))
+    if key.startswith("wd_"):
+        head, sep, tail = key[3:].rpartition("_")
+        if sep and len(tail) == 12 and all(c in "0123456789abcdef"
+                                           for c in tail.lower()):
+            return head
+        return key[3:]
+    return key or "kimi"
+
+
 def fmt_ago(sec):
     return "%d分" % (sec // 60) if sec >= 60 else "%d秒" % sec
 
@@ -488,7 +618,33 @@ def main():
                          "groups": groups, "err_ts": err_ts, "wait": wait,
                          "agents": (0, 0.0)})
 
-    # 两源合并后按活跃时间取最活跃的 MAX_SESSIONS 个
+    # ---- Kimi Code 会话:wire.jsonl 解析出同构的组,下游流水线全部复用 ----
+    klabels = kimi_session_labels()
+    for eff, path, sdir, agent_paths in kimi_recent_files():
+        groups, err_ts, trig_ts = kimi_parse(tail_lines(path))
+        wait = None
+        if trig_ts and WAIT_MIN < now - trig_ts <= WAIT_MAX:
+            wait = int(now - trig_ts)
+        n_ag, burn, apts = agent_metrics(
+            agent_paths, now, parse=lambda lines: kimi_parse(lines)[0])
+        # 入榜规则与 Claude 段一致:近期响应 / 等待中 / 近期错误 / 代理在跑
+        has_recent = bool(groups) and now - groups[-1]["end"] < SCAN_WINDOW
+        has_err = any(now - e <= ERR_ROW_WINDOW for e in err_ts)
+        if not has_recent and wait is None and not has_err and not n_ag:
+            continue
+        for g in groups:
+            d = g["end"] - g["start"]
+            if plausible_point(g["out"], d):
+                pool.setdefault(g.get("model"), []).append((g["out"], d))
+        for mdl, out, d in apts:  # 子代理响应与主链同构,并入同模型点池
+            pool.setdefault(mdl, []).append((out, d))
+        sessions.append({"mtime": eff,
+                         "label": (klabels.get(sdir)
+                                   or kimi_label_fallback(sdir))[:16],
+                         "groups": groups, "err_ts": err_ts, "wait": wait,
+                         "agents": (n_ag, burn)})
+
+    # 多源合并后按活跃时间取最活跃的 MAX_SESSIONS 个
     sessions.sort(key=lambda s: s["mtime"], reverse=True)
     sessions = sessions[:MAX_SESSIONS]
 
@@ -590,7 +746,7 @@ def main():
             segs.append("%s前" % fmt_ago(now - r["end"]))
         print("%s  %s" % (head, "  ".join(segs)))
     if not rows:
-        print("近2小时无 Claude 响应")
+        print("近2小时无响应")
 
 
 if __name__ == "__main__":

@@ -199,7 +199,7 @@ def subagent_paths(transcript_path):
                   glob.glob(os.path.join(sub, "workflows", "*", "agent-*.jsonl")))
 
 
-def agent_metrics(paths, now):
+def agent_metrics(paths, now, parse=None):
     """子代理聚合 → (活跃代理数, 后台总吞吐 Σtok/s, 可入池样本点)。
 
     活跃 = 文件在 AGENT_ACTIVE_WINDOW 内有写入(生成中的代理会持续写)。
@@ -207,6 +207,7 @@ def agent_metrics(paths, now):
     燃烧率,含在途未完成的组;跨窗口的长响应按时间占比折算,不整组记入)。
     样本点 = (model, out, dur),供两阶段拟合入池。每轮最多读
     AGENT_MAX_READ 个最新文件控制 IO,超出的只计数不读——吞吐会相应低估。
+    parse = lines→groups 提取器,默认 Claude transcript;Kimi 子代理传 wire 解析。
     """
     stamped = []
     for p in paths:
@@ -219,7 +220,7 @@ def agent_metrics(paths, now):
     stamped.sort(reverse=True)
     active, out_sum, pts = len(stamped), 0.0, []
     for _, p in stamped[:AGENT_MAX_READ]:
-        groups, _ = response_groups(tail_lines(p))
+        groups = parse(tail_lines(p)) if parse else response_groups(tail_lines(p))[0]
         for g in groups:
             d = g["end"] - g["start"]
             if plausible_point(g["out"], d):

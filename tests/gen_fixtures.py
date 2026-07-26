@@ -132,6 +132,49 @@ def codex_crossturn_poison(t, tps, ttft):
             + codex_turn(t + 100, 500, tps, ttft, closed=True))   # 边界 + 干净轮
 
 
+# ---------- Kimi Code wire 记录 ----------
+
+def km(off, typ, **fields):
+    r = {"type": typ,
+         "time": str(int((REF + timedelta(seconds=off)).timestamp() * 1000))}
+    r.update(fields)
+    return r
+
+
+def km_step(t, out, tps, ttft, model="k3", inp=100, cr=9000, cc=50):
+    """一步 = 一次 API 响应:llm.request → content.part → step.end。
+    dur = step.end.time − llm.request.time = ttft + out/tps(端到端,含 TTFT)。"""
+    end = t + ttft + out / tps
+    return [km(t, "llm.request", kind="loop", model=model,
+               modelAlias="kimi-code/" + model),
+            km(t + ttft, "context.append_loop_event",
+               event={"type": "content.part"}),
+            km(end, "context.append_loop_event",
+               event={"type": "step.end", "finishReason": "end_turn",
+                      "messageId": "msg%d" % int(t * 10),
+                      "usage": {"inputOther": inp, "output": out,
+                                "inputCacheRead": cr,
+                                "inputCacheCreation": cc}})]
+
+
+def kimi_steady(tps, ttft, outs, model="k3", gap=60, t0=0):
+    """稳态会话:turn.prompt → 一步响应,每步 dur = ttft + out/tps。"""
+    recs, t = [], t0
+    for out in outs:
+        recs.append(km(t, "turn.prompt"))
+        recs += km_step(t + 0.1, out, tps, ttft, model=model)
+        t += gap
+    return recs
+
+
+def kimi_retry_poison(t, tps, ttft, out=600):
+    """失败请求(无 step.end)+ 30s 后重试成功:锚点必须取重试的 llm.request——
+    若错从首请求起算,dur 掺入 30s 重试间隔(dur/out≈0.07 不过滤),成假慢点。"""
+    return ([km(t, "llm.request", kind="loop", model="k3",
+                modelAlias="kimi-code/k3")]
+            + km_step(t + 30, out, tps, ttft))
+
+
 # ---------- 夹具集 ----------
 
 def build():
@@ -154,6 +197,11 @@ def build():
         # 病理:跨轮合并丢弃(轮次边界)
         "codex-cross-turn": (codex_steady(90, 4, [150, 400, 800, 1400, 2200, 3000])
                              + codex_crossturn_poison(700, 90, 4)),
+        # Kimi 主标定
+        "kimi-steady-80x6": kimi_steady(80, 6, [120, 350, 700, 1100, 1700, 2400]),
+        # 病理:失败请求无 step.end,锚点取重试的 llm.request
+        "kimi-retry": (kimi_steady(80, 6, [120, 350, 700, 1100, 1700, 2400])
+                       + kimi_retry_poison(700, 80, 6)),
     }
 
 

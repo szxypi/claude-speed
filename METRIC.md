@@ -1,4 +1,4 @@
-# claude-speed measurement standard — METRIC v1.0
+# claude-speed measurement standard — METRIC v1.1
 
 This document is the **definition** of the number claude-speed displays — the
 written spec, like the text that defines the metre. The displayed speed is not
@@ -18,15 +18,21 @@ monitoring tool, comparability over time matters more than absolute truth.
 
 One **API response** = consecutive records that belong to a single model
 generation (Claude: same `message.id`; Codex: content records between turn
-boundaries). For each response:
+boundaries; Kimi: one `llm.request` → `step.end` pair). For each response:
 
-- **out** = `usage.output_tokens` (the max within the group; exact).
+- **out** = `usage.output_tokens` (the max within the group; exact. Kimi:
+  `step.end`'s `usage.output`).
 - **duration** = `end − start`, where
   - **start** = timestamp of the record immediately preceding the group's first
-    content record (≈ request send time) — so duration **includes TTFT**;
+    content record (≈ request send time) — so duration **includes TTFT**
+    (Kimi: the `llm.request` record's own `time`, which *is* the request send
+    time; wire `time` fields are epoch-milliseconds strings);
   - **end** = timestamp of the group's **last content record** — never a
     trailing bookkeeping record (Codex `token_count` fires after tool execution
-    and would fold tool time into generation).
+    and would fold tool time into generation. Kimi: the closing `step.end`
+    record, which marks response consumption complete).
+  - Kimi retries: a new `llm.request` discards any unclosed earlier request —
+    the anchor moves to the retry, mirroring Claude's error-anchor rule.
 
 Across a set of responses, model:
 
@@ -81,8 +87,8 @@ that lets the poison through shifts the reading and trips the test.
    ±0.5s). Guards against a *biased* recalibration (re-pinning the registry to a
    wrong value).
 
-At METRIC v1.0 the estimator recovers every synthetic fixture's truth exactly
-(70/5, 45/8, 90/4).
+At METRIC v1.1 the estimator recovers every synthetic fixture's truth exactly
+(70/5, 45/8, 90/4, 80/6).
 
 ## Recalibration
 
@@ -100,6 +106,13 @@ codex readings −38% on instant-group fixture; METRIC v1.0 → v1.1". The
 ground-truth values in the SPEC do not change, so the diff isolates exactly how
 much the basis moved. This is the tool's equivalent of a CODATA bulletin: the
 standard may be revised, but never silently.
+
+Version history:
+
+- **v1.0** — initial standard (Claude + Codex sources).
+- **v1.1** — added the Kimi Code source definition (`llm.request` → `step.end`
+  pairing, epoch-ms `time` fields, retry anchoring). Existing Claude/Codex
+  fixture readings unchanged (zero drift, verified by `regen_golden.py`).
 
 ## What this standard does not cover
 

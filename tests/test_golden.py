@@ -24,6 +24,10 @@ def load_cs():
 
 
 class TestGolden(unittest.TestCase):
+    PARSERS = {"claude": lambda cs, lines: cs.response_groups(lines)[0],
+               "codex": lambda cs, lines: cs.codex_parse(lines)[0],
+               "kimi": lambda cs, lines: cs.kimi_parse(lines)[0]}
+
     @classmethod
     def setUpClass(cls):
         cls.cs = load_cs()
@@ -33,8 +37,7 @@ class TestGolden(unittest.TestCase):
     def measure(self, name, source):
         with open(os.path.join(HERE, "fixtures", name + ".jsonl")) as f:
             lines = f.read().splitlines()
-        groups = (self.cs.response_groups(lines)[0] if source == "claude"
-                  else self.cs.codex_parse(lines)[0])
+        groups = self.PARSERS[source](self.cs, lines)
         return groups, self.cs.fit_speed(self.cs.current_model_groups(groups))
 
     def test_version_matches_metric_md(self):

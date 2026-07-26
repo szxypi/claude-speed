@@ -32,11 +32,11 @@ claude-speed 对近期响应拟合 `耗时 ≈ TTFT + token数/TPS`（Theil-Sen 
 
 | 文件 | 作用 |
 |---|---|
-| `collect.py` | 采集核心：扫 `~/.claude/projects/` 活跃会话 transcript，输出「首行=菜单栏标题，其余行=下拉明细」 |
+| `collect.py` | 采集核心：扫 `~/.claude/projects/`、`~/.codex/sessions/`、`~/.kimi-code/sessions/` 的活跃会话 transcript，输出「首行=菜单栏标题，其余行=下拉明细」 |
 | `main.swift` → `ClaudeSpeed` | 菜单栏应用（零第三方依赖，`swiftc` 直编），每 3s 刷新 |
 | `statusline-speed.py` | [Claude Code statusline](https://docs.anthropic.com/en/docs/claude-code/statusline) 脚本——同一套算法，渲染成输入框下方一行 ANSI 彩色文本 |
 
-覆盖所有客户端（CLI、桌面 App、VS Code 插件都写同一份 transcript）。只读本地文件，无任何网络请求。
+覆盖所有 Claude Code 客户端（CLI、桌面 App、VS Code 插件都写同一份 transcript）；菜单栏同时并入 **Codex CLI** 与 **Kimi Code** 会话（见「测速算法」）。只读本地文件，无任何网络请求。
 
 ## 安装
 
@@ -81,7 +81,7 @@ git clone https://github.com/JuDaXia/claude-speed && cd claude-speed
 
 标题刻意保持最简——等待类指示只进下拉：`⏳等N秒` 在请求等待期间实时上涨（>120s 视为已中断自动消失），还没有任何响应的会话显示「等待首个响应」。
 
-下拉每行一个活跃会话（最多 4 个，近 2 小时，**Claude Code 与 Codex CLI 合并排序**）：
+下拉每行一个活跃会话（最多 4 个，近 2 小时，**Claude Code、Codex CLI 与 Kimi Code 合并排序**）：
 
 ```
 myproject·fable5  🟢 71 tok/s 首字4s  缓存12%冷  ⚠️1错  最近1022tok·22s  4秒前
@@ -102,6 +102,7 @@ statusline 颜色：速度 绿≥50/黄≥30/红<30 · 首字 绿≤5s/黄≤12s
 - **诚实回退**：再不行时，长回复（≥300tok）的 blended 速度按**下界** `≥N` 显示（下界过绿线才亮绿灯）；否则「速度样本不足」。大文件只尾读 400KB，坏行静默跳过；
 - **后台子代理监控**：调研/Task 类后台任务写在 `<会话>/subagents/agent-*.jsonl`，主 transcript 期间静默——因此会话活跃时间取 `max(主transcript, 最新子代理)`，后台干活不会被误判成闲置。近 90 秒有写入的代理算活跃，其近 2 分钟合计产出即舰队燃烧率（`🤖N Σtok/s`），代理的响应样本同时并入跨会话点池参与两阶段拟合；
 - **Codex CLI 支持**（仅菜单栏）：Codex 会话在 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`，每次 API 响应流式写内容记录、以带完整 usage 的 `token_count` 事件收尾。组 start = 首条内容记录的前一条记录时间戳（含 TTFT，与 Claude 语义一致）；组 end = **最后一条内容记录**而非 `token_count`——后者在工具执行完才发出，会把工具耗时算进生成时间。模型取 `turn_context`、项目标签取 `session_meta.cwd`、缓存命中率 = `cached_input_tokens/input_tokens`。下游拟合/滑窗/显示全部复用。文件被碰过但内容陈旧的僵尸会话不入榜。
+- **Kimi Code 支持**（仅菜单栏——Kimi Code 没有 statusline 机制）：会话在 `~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/main/wire.jsonl`（数据根可用 `KIMI_CODE_HOME` 重定位）。一次 API 响应 = `llm.request` 记录与其收尾的 `step.end` 事件配对（后者带完整 usage）。组 start = `llm.request` 的 time（它本身就是请求发出时刻）；组 end = `step.end` 的 time；wire 的 `time` 字段是 epoch 毫秒字符串。重试（`step.end` 前出现新的 `llm.request`）锚点取重试时刻，与 Claude 的错误锚点规则一致。usage 一一对应（`inputOther`/`inputCacheRead`/`inputCacheCreation`）；模型取 `llm.request.model`；项目标签取 `session_index.jsonl` 的 `workDir`，缺失时回退 `workDirKey` 的 slug 段。子代理在 `agents/agent-*/wire.jsonl`，同样计入舰队监控（`🤖N Σtok/s`）与斜率点池。注意：`wire.jsonl` 是未文档化的内部格式——解析器对不认识的记录一律跳过，未来格式变化只会让显示降级而不会崩溃。
 
 ## 运维
 
@@ -123,7 +124,7 @@ launchctl kickstart -k gui/$(id -u)/com.claude-speed.menubar
 ## 测量标准
 
 显示的速度是**估计值**、非绝对读数,其基准会随算法演进而漂移——所以定义被钉死。
-[METRIC.md](METRIC.md) 是带版本号的规范(当前 v1.0):速度的定义、锚点规则、估计器、
+[METRIC.md](METRIC.md) 是带版本号的规范(当前 v1.1):速度的定义、锚点规则、估计器、
 全部参数。`tests/fixtures/*.jsonl` 是冻结的 transcript 字节(千克原器),`tests/golden.json`
 是它们的认证读数。每次 CI 都断言估计器仍能复现这些读数(**漂移**——任何移动了数字的
 代码改动都会让测试变红),并且仍能还原每个合成夹具的已知真值(**校准**——拦截有偏的重定标)。
@@ -135,7 +136,7 @@ launchctl kickstart -k gui/$(id -u)/com.claude-speed.menubar
 python3 -m unittest discover -s tests -v
 ```
 
-65 个测试覆盖:拟合数学(已知真值还原、离群剔除、扩窗)、菜单栏端到端场景
+74 个测试覆盖:拟合数学(已知真值还原、离群剔除、扩窗)、菜单栏端到端场景
 (等待/错误/冷缓存/两阶段拟合/后台子代理与燃烧率折算)、以及一个 AST 级源码
 比对——强制共享算法在 `collect.py` 与 `statusline-speed.py` 间保持逐字一致。
 CI 在 macOS + Linux 跑测试,外加 `swiftc` 编译冒烟。

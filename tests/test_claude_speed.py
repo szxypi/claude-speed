@@ -296,6 +296,39 @@ def cx_session(now, tps=70.0, ttft=5.0, outs=(100, 400, 800, 1500, 2500),
     return recs
 
 
+# ---------- Kimi Code wire 合成记录构造 ----------
+
+def km(t, typ, **fields):
+    r = {"type": typ, "time": str(int(t * 1000))}  # wire 的 time 是 epoch 毫秒字符串
+    r.update(fields)
+    return r
+
+
+def km_step(t, out, tps, ttft, model="k3", inp=100, cr=9000, cc=50):
+    """一步 = 一次 API 响应:llm.request → content.part → step.end(带 usage)。"""
+    end = t + ttft + out / tps
+    return [km(t, "llm.request", kind="loop", model=model),
+            km(t + ttft, "context.append_loop_event",
+               event={"type": "content.part"}),
+            km(end, "context.append_loop_event",
+               event={"type": "step.end", "finishReason": "end_turn",
+                      "messageId": "msg%d" % int(t),
+                      "usage": {"inputOther": inp, "output": out,
+                                "inputCacheRead": cr,
+                                "inputCacheCreation": cc}})]
+
+
+def km_session(now, tps=80.0, ttft=6.0, outs=(120, 350, 700, 1100, 1700, 2400),
+               start=None, gap=60, model="k3"):
+    """构造已知真值的 Kimi 会话:每条响应 dur = ttft + out/tps。"""
+    recs, t = [], (start if start is not None else now - 600)
+    for out in outs:
+        recs.append(km(t, "turn.prompt"))
+        recs += km_step(t + 0.1, out, tps, ttft, model=model)
+        t += gap
+    return recs
+
+
 # ---------- collect.py 独有函数 ----------
 
 class TestCollectHelpers(unittest.TestCase):
@@ -406,18 +439,86 @@ class TestCodexParse(unittest.TestCase):
         self.assertIsNone(trig)
 
 
+class TestKimiParse(unittest.TestCase):
+    def test_recovers_known_speed(self):
+        now = time.time()
+        groups, err_ts, _ = cs.kimi_parse(jlines(km_session(now, tps=80, ttft=6)))
+        self.assertEqual(len(groups), 6)
+        self.assertEqual(groups[-1]["model"], "k3")
+        self.assertEqual(err_ts, [])
+        tps, ttft = cs.fit_speed(groups)
+        self.assertAlmostEqual(tps, 80, delta=2)
+        self.assertAlmostEqual(ttft, 6, delta=0.5)
+
+    def test_usage_mapping(self):
+        now = time.time()
+        groups, _, _ = cs.kimi_parse(jlines(km_session(now, outs=(500,))))
+        g = groups[0]
+        self.assertEqual(g["inp"], 100)
+        self.assertEqual(g["cr"], 9000)
+        self.assertEqual(g["cc"], 50)
+
+    def test_start_anchor_is_request_send_time(self):
+        # turn.prompt 在前:锚点是 llm.request(请求发出时刻),不是 prompt
+        now = time.time()
+        recs = [km(now - 30, "turn.prompt")] + km_step(now - 20, 300, 80, 6)
+        groups, _, _ = cs.kimi_parse(jlines(recs))
+        self.assertEqual(len(groups), 1)
+        self.assertAlmostEqual(groups[0]["start"], now - 20, delta=0.01)
+        self.assertAlmostEqual(groups[0]["end"], now - 20 + 6 + 300 / 80, delta=0.01)
+
+    def test_retry_reanchors_to_retry_request(self):
+        # 失败请求(无 step.end)30s 后重试:锚点必须取重试的 llm.request,
+        # 否则 dur 掺入重试间隔成假慢点
+        now = time.time()
+        recs = [km(now - 60, "llm.request", kind="loop", model="k3")]
+        recs += km_step(now - 30, 600, 80, 6)
+        groups, _, _ = cs.kimi_parse(jlines(recs))
+        self.assertEqual(len(groups), 1)
+        self.assertAlmostEqual(groups[0]["start"], now - 30, delta=0.01)
+
+    def test_waiting_trigger_cleared_by_content_and_step_end(self):
+        now = time.time()
+        # 尾部是 llm.request(已发请求无返回)→ 等待中
+        _, _, trig = cs.kimi_parse(jlines(
+            [km(now - 8, "turn.prompt"),
+             km(now - 7, "llm.request", kind="loop", model="k3")]))
+        self.assertAlmostEqual(trig, now - 7, delta=0.01)
+        # 首个内容到达清零
+        _, _, trig = cs.kimi_parse(jlines(
+            [km(now - 8, "llm.request", kind="loop", model="k3"),
+             km(now - 6, "context.append_loop_event",
+                event={"type": "content.part"})]))
+        self.assertIsNone(trig)
+        # step.end 落地清零
+        _, _, trig = cs.kimi_parse(jlines(km_step(now - 20, 300, 80, 6)))
+        self.assertIsNone(trig)
+
+    def test_malformed_and_unknown_records_skipped(self):
+        # wire 是未文档化内部格式:坏行/未知记录一律跳过,不影响解析
+        now = time.time()
+        recs = ["not json",
+                json.dumps({"type": "metadata", "protocol_version": "1.0"}),
+                json.dumps({"type": "usage.record", "model": "kimi-code/k3"})]
+        recs += jlines(km_step(now - 20, 300, 80, 6))
+        groups, _, _ = cs.kimi_parse(recs)
+        self.assertEqual(len(groups), 1)
+
+
 # ---------- collect.main 端到端合成场景 ----------
 
 class TestCollectMain(unittest.TestCase):
     def setUp(self):
         self.root = tempfile.mkdtemp()
         self.codex_root = tempfile.mkdtemp()  # 隔离,防真实 ~/.codex 漏进测试
-        self._old_root, self._old_codex = cs.ROOT, cs.CODEX_ROOT
-        cs.ROOT, cs.CODEX_ROOT = self.root, self.codex_root
+        self.kimi_root = tempfile.mkdtemp()   # 隔离,防真实 ~/.kimi-code 漏进测试
+        self._old = (cs.ROOT, cs.CODEX_ROOT, cs.KIMI_ROOT)
+        cs.ROOT, cs.CODEX_ROOT, cs.KIMI_ROOT = (self.root, self.codex_root,
+                                                self.kimi_root)
         self.now = time.time()
 
     def tearDown(self):
-        cs.ROOT, cs.CODEX_ROOT = self._old_root, self._old_codex
+        cs.ROOT, cs.CODEX_ROOT, cs.KIMI_ROOT = self._old
 
     def write(self, dirname, recs, mtime=None):
         d = os.path.join(self.root, dirname)
@@ -429,6 +530,17 @@ class TestCollectMain(unittest.TestCase):
         if mtime:
             os.utime(p, (mtime, mtime))
 
+    def write_kimi(self, wdkey, recs, mtime=None):
+        # 布局:<KIMI_ROOT>/<wd_key>/<sessionId>/agents/main/wire.jsonl
+        p = os.path.join(self.kimi_root, wdkey, "session_x", "agents", "main")
+        os.makedirs(p, exist_ok=True)
+        wp = os.path.join(p, "wire.jsonl")
+        with open(wp, "w") as f:
+            for r in recs:
+                f.write(json.dumps(r) + "\n")
+        if mtime:
+            os.utime(wp, (mtime, mtime))
+
     def run_main(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -438,7 +550,7 @@ class TestCollectMain(unittest.TestCase):
     def test_idle_empty_root(self):
         out = self.run_main()
         self.assertIn("⚪", out.splitlines()[0])
-        self.assertIn("近2小时无 Claude 响应", out)
+        self.assertIn("近2小时无响应", out)
 
     def test_full_fit_renders_speed_and_ttft(self):
         self.write("-Users-x-proj-alpha", make_session(self.now, tps=70, ttft=4))
@@ -587,14 +699,14 @@ class TestCollectMain(unittest.TestCase):
         old = make_session(self.now, start=self.now - 3 * 3600, gap=30)
         self.write("-Users-x-proj-zombie", old, mtime=self.now - 60)
         out = self.run_main()
-        self.assertIn("近2小时无 Claude 响应", out)
+        self.assertIn("近2小时无响应", out)
 
     def test_codex_zombie_excluded(self):
         # Codex 侧同样适用僵尸过滤:文件 mtime 新、内容陈旧 → 不入榜
         stale = cx_session(self.now, start=self.now - 3 * 3600, gap=30)
         self.write_codex("rollout-z.jsonl", stale, mtime=self.now - 60)
         out = self.run_main()
-        self.assertIn("近2小时无 Claude 响应", out)
+        self.assertIn("近2小时无响应", out)
 
     def test_codex_waiting_row(self):
         recs = cx_session(self.now, outs=(300,), start=self.now - 200)
@@ -603,6 +715,30 @@ class TestCollectMain(unittest.TestCase):
         out = self.run_main()
         self.assertIn("⏳等10秒", out)  # 有历史响应:速度段照常,等待作附加段
 
+    def test_kimi_session_rendered(self):
+        # session_index 缺失 → 标签回退自 workDirKey(wd_<slug>_<hash12>)
+        self.write_kimi("wd_myproj_abc123def456",
+                        km_session(self.now, tps=80, ttft=6))
+        out = self.run_main()
+        self.assertIn("myproj·k3", out)
+        self.assertIn("🟢", out)
+        self.assertIn("tok/s", out)
+        self.assertIn("首字", out)
+
+    def test_kimi_waiting_row(self):
+        recs = km_session(self.now, outs=(300,), start=self.now - 200)
+        recs.append(km(self.now - 10, "turn.prompt"))
+        self.write_kimi("wd_waitproj-abc123def456", recs, mtime=self.now - 10)
+        out = self.run_main()
+        self.assertIn("⏳等10秒", out)
+
+    def test_kimi_zombie_excluded(self):
+        # 文件 mtime 新、内容陈旧 → 不入榜(僵尸过滤与 Claude/Codex 同规则)
+        stale = km_session(self.now, start=self.now - 3 * 3600, gap=30)
+        self.write_kimi("wd_oldproj-abc123def456", stale, mtime=self.now - 60)
+        out = self.run_main()
+        self.assertIn("近2小时无响应", out)
+
     def test_agent_transcripts_ignored(self):
         d = os.path.join(self.root, "-Users-x-proj-sub")
         os.makedirs(d)
@@ -610,7 +746,7 @@ class TestCollectMain(unittest.TestCase):
             for r in make_session(self.now):
                 f.write(json.dumps(r) + "\n")
         out = self.run_main()
-        self.assertIn("近2小时无 Claude 响应", out)  # 子代理文件不算会话
+        self.assertIn("近2小时无响应", out)  # 子代理文件不算会话
 
 
 # ---------- statusline 端到端 ----------
