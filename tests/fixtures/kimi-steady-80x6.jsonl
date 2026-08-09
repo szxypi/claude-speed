@@ -1,0 +1,24 @@
+{"type": "turn.prompt", "time": "1767225600000"}
+{"type": "llm.request", "time": "1767225600100", "kind": "loop", "model": "k3", "modelAlias": "kimi-code/k3"}
+{"type": "context.append_loop_event", "time": "1767225606100", "event": {"type": "content.part"}}
+{"type": "context.append_loop_event", "time": "1767225607600", "event": {"type": "step.end", "finishReason": "end_turn", "messageId": "msg1", "usage": {"inputOther": 100, "output": 120, "inputCacheRead": 9000, "inputCacheCreation": 50}}}
+{"type": "turn.prompt", "time": "1767225660000"}
+{"type": "llm.request", "time": "1767225660100", "kind": "loop", "model": "k3", "modelAlias": "kimi-code/k3"}
+{"type": "context.append_loop_event", "time": "1767225666100", "event": {"type": "content.part"}}
+{"type": "context.append_loop_event", "time": "1767225670475", "event": {"type": "step.end", "finishReason": "end_turn", "messageId": "msg601", "usage": {"inputOther": 100, "output": 350, "inputCacheRead": 9000, "inputCacheCreation": 50}}}
+{"type": "turn.prompt", "time": "1767225720000"}
+{"type": "llm.request", "time": "1767225720100", "kind": "loop", "model": "k3", "modelAlias": "kimi-code/k3"}
+{"type": "context.append_loop_event", "time": "1767225726100", "event": {"type": "content.part"}}
+{"type": "context.append_loop_event", "time": "1767225734850", "event": {"type": "step.end", "finishReason": "end_turn", "messageId": "msg1201", "usage": {"inputOther": 100, "output": 700, "inputCacheRead": 9000, "inputCacheCreation": 50}}}
+{"type": "turn.prompt", "time": "1767225780000"}
+{"type": "llm.request", "time": "1767225780100", "kind": "loop", "model": "k3", "modelAlias": "kimi-code/k3"}
+{"type": "context.append_loop_event", "time": "1767225786100", "event": {"type": "content.part"}}
+{"type": "context.append_loop_event", "time": "1767225799850", "event": {"type": "step.end", "finishReason": "end_turn", "messageId": "msg1801", "usage": {"inputOther": 100, "output": 1100, "inputCacheRead": 9000, "inputCacheCreation": 50}}}
+{"type": "turn.prompt", "time": "1767225840000"}
+{"type": "llm.request", "time": "1767225840100", "kind": "loop", "model": "k3", "modelAlias": "kimi-code/k3"}
+{"type": "context.append_loop_event", "time": "1767225846100", "event": {"type": "content.part"}}
+{"type": "context.append_loop_event", "time": "1767225867350", "event": {"type": "step.end", "finishReason": "end_turn", "messageId": "msg2401", "usage": {"inputOther": 100, "output": 1700, "inputCacheRead": 9000, "inputCacheCreation": 50}}}
+{"type": "turn.prompt", "time": "1767225900000"}
+{"type": "llm.request", "time": "1767225900100", "kind": "loop", "model": "k3", "modelAlias": "kimi-code/k3"}
+{"type": "context.append_loop_event", "time": "1767225906100", "event": {"type": "content.part"}}
+{"type": "context.append_loop_event", "time": "1767225936100", "event": {"type": "step.end", "finishReason": "end_turn", "messageId": "msg3001", "usage": {"inputOther": 100, "output": 2400, "inputCacheRead": 9000, "inputCacheCreation": 50}}}

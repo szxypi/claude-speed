@@ -1,0 +1,12 @@
+{"table": "message", "id": "oc-steady-0", "role": "assistant", "created": 1767225600000, "completed": 1767225607000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 136, "reasoning": 34, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-steady-0", "type": "text", "start": 1767225605000, "end": 1767225607000, "status": null}
+{"table": "message", "id": "oc-steady-1", "role": "assistant", "created": 1767225690000, "completed": 1767225700000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 340, "reasoning": 85, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-steady-1", "type": "text", "start": 1767225695000, "end": 1767225700000, "status": null}
+{"table": "message", "id": "oc-steady-2", "role": "assistant", "created": 1767225780000, "completed": 1767225795000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 680, "reasoning": 170, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-steady-2", "type": "text", "start": 1767225785000, "end": 1767225795000, "status": null}
+{"table": "message", "id": "oc-steady-3", "role": "assistant", "created": 1767225870000, "completed": 1767225891000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 1088, "reasoning": 272, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-steady-3", "type": "text", "start": 1767225875000, "end": 1767225891000, "status": null}
+{"table": "message", "id": "oc-steady-4", "role": "assistant", "created": 1767225960000, "completed": 1767225990000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 1700, "reasoning": 425, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-steady-4", "type": "text", "start": 1767225965000, "end": 1767225990000, "status": null}
+{"table": "message", "id": "oc-steady-5", "role": "assistant", "created": 1767226050000, "completed": 1767226090000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 2380, "reasoning": 595, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-steady-5", "type": "text", "start": 1767226055000, "end": 1767226090000, "status": null}

@@ -43,6 +43,24 @@ cat > "$PLIST" <<EOF
 </dict>
 </plist>
 EOF
+# OpenCode Desktop 会从登录 shell 读取 XDG/OPENCODE_*；LaunchAgent 不会。
+# 安装时把实际使用的数据路径一并固化，保证自定义 data/db 位置也能被采集。
+python3 - "$PLIST" "${XDG_DATA_HOME:-}" "${OPENCODE_DB:-}" <<'PY'
+import plistlib, sys
+
+path, xdg_data, opencode_db = sys.argv[1:]
+env = {}
+if xdg_data:
+    env["XDG_DATA_HOME"] = xdg_data
+if opencode_db:
+    env["OPENCODE_DB"] = opencode_db
+if env:
+    with open(path, "rb") as f:
+        doc = plistlib.load(f)
+    doc["EnvironmentVariables"] = env
+    with open(path, "wb") as f:
+        plistlib.dump(doc, f)
+PY
 # bootstrap (not load): works correctly from any context, incl. SSH/agents
 launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null \
   || launchctl kickstart -k "gui/$(id -u)/$LABEL"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""菜单栏速度采集:扫描 ~/.claude/projects 下近期活跃的会话 transcript。
+"""菜单栏速度采集:汇总 Claude/Codex/Kimi/OpenCode 的近期活跃会话。
 
 输出协议(给 ClaudeSpeed 菜单栏程序,每 3s 调一次):
   第 1 行 = 菜单栏标题;其余行 = 下拉菜单内容。
@@ -12,15 +12,34 @@
 import glob
 import json
 import os
+import sqlite3
 import time
 from datetime import datetime
+from urllib.parse import quote
 
 ROOT = os.path.expanduser("~/.claude/projects")
 SCAN_WINDOW = 2 * 3600  # 下拉列出近 2 小时内有写入的会话
 TITLE_WINDOW = 10 * 60  # 最新响应超过 10 分钟,标题速度位显示为闲置
-MAX_SESSIONS = 4        # 下拉最多列几个会话(Claude 与 Codex 合并后取最活跃的)
+MAX_SESSIONS = 4        # 下拉最多列几个会话(全部数据源合并后取最活跃的)
 TAIL_BYTES = 400_000
 CODEX_ROOT = os.path.expanduser("~/.codex/sessions")  # Codex CLI 会话目录
+# Kimi Code 会话目录(数据根可用 KIMI_CODE_HOME 重定位,见官方 data-locations 文档)
+KIMI_ROOT = os.path.join(
+    os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code"),
+    "sessions")
+# OpenCode Desktop 与 CLI 共用 XDG data 下的 SQLite 数据库。OPENCODE_DB 是
+# OpenCode 自身支持的覆盖项:绝对路径直接用,相对路径仍相对 data/opencode。
+OPENCODE_DATA = os.path.join(
+    os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"),
+    "opencode")
+_OPENCODE_DB_ENV = os.environ.get("OPENCODE_DB")
+OPENCODE_DB = (
+    _OPENCODE_DB_ENV if _OPENCODE_DB_ENV == ":memory:"
+    else _OPENCODE_DB_ENV if _OPENCODE_DB_ENV and os.path.isabs(_OPENCODE_DB_ENV)
+    else os.path.join(OPENCODE_DATA, _OPENCODE_DB_ENV or "opencode.db")
+)
+OPENCODE_MAX_MESSAGES = 200  # 每个近期会话只读最新 N 条 message metadata
+OPENCODE_MAX_SESSIONS = 64   # 含 parent/child；防异常库拖慢 3s 刷新
 
 # 速度拆分参数(见 fit_speed,与 statusline-speed.py 完全一致)
 MAX_SEC_PER_TOK = 0.5   # dur/out>0.5s(<2tok/s)的组基本掺了「发消息前的停顿」,剔除
@@ -135,6 +154,10 @@ def current_model_groups(groups):
 def model_tag(mid):
     """'claude-opus-4-8'→'opus4.8'  'claude-fable-5'→'fable5'
     非 claude 系(如 Codex 的 'gpt-5.6-sol'→'gpt5.6sol')去连字符截短。"""
+    # OpenCode 的点池 key 带 source/provider 命名空间，展示只取 modelID。
+    # 这样同名模型不会跨 provider/客户端误借斜率。
+    if (mid or "").startswith("opencode:"):
+        mid = mid.rsplit("/", 1)[-1]
     parts = [p for p in (mid or "").split("-") if p]
     if not parts:
         return ""
@@ -239,7 +262,7 @@ def subagent_paths(transcript_path):
                   glob.glob(os.path.join(sub, "workflows", "*", "agent-*.jsonl")))
 
 
-def agent_metrics(paths, now):
+def agent_metrics(paths, now, parse=None):
     """子代理聚合 → (活跃代理数, 后台总吞吐 Σtok/s, 可入池样本点)。
 
     活跃 = 文件在 AGENT_ACTIVE_WINDOW 内有写入(生成中的代理会持续写)。
@@ -247,6 +270,7 @@ def agent_metrics(paths, now):
     燃烧率,含在途未完成的组;跨窗口的长响应按时间占比折算,不整组记入)。
     样本点 = (model, out, dur),供两阶段拟合入池。每轮最多读
     AGENT_MAX_READ 个最新文件控制 IO,超出的只计数不读——吞吐会相应低估。
+    parse = lines→groups 提取器,默认 Claude transcript;Kimi 子代理传 wire 解析。
     """
     stamped = []
     for p in paths:
@@ -259,7 +283,7 @@ def agent_metrics(paths, now):
     stamped.sort(reverse=True)
     active, out_sum, pts = len(stamped), 0.0, []
     for _, p in stamped[:AGENT_MAX_READ]:
-        groups, _ = response_groups(tail_lines(p))
+        groups = parse(tail_lines(p)) if parse else response_groups(tail_lines(p))[0]
         for g in groups:
             d = g["end"] - g["start"]
             if plausible_point(g["out"], d):
@@ -429,6 +453,455 @@ def codex_recent_files():
     return found[:MAX_SESSIONS]
 
 
+# ---- Kimi Code 数据源(仅 collect;wire.jsonl 是未文档化内部格式,解析须防御) ----
+
+
+def kimi_ts(v):
+    """wire 记录的 time 字段是 epoch 毫秒字符串。"""
+    try:
+        return float(v) / 1000
+    except (TypeError, ValueError):
+        return None
+
+
+def kimi_parse(lines):
+    """解析 Kimi Code wire.jsonl → (groups, err_ts, last_trigger_ts)。
+
+    组语义与 response_groups 对齐:一次 API 响应 = llm.request → 紧随的
+    step.end 配对。锚点规则:
+    - start = llm.request.time(请求发出时刻,语义同 Claude 的「组前一条记录」);
+    - end = step.end.time(响应完整消费,端到端含 TTFT)。
+    重试(服务端错误后重新请求):新的 llm.request 到来时丢弃未闭合的旧
+    request,锚点取重试时刻——同 Claude 的错误锚点哲学。
+    usage 映射:inp=inputOther、cr=inputCacheRead、cc=inputCacheCreation
+    (与 Claude 的非缓存输入/缓存读/缓存写一一对应)。模型取 llm.request.model
+    (如 "k3"),与 Claude/Codex 的模型名不撞池。
+    err_ts:错误记录格式未实测到,防御性收集任何 type 含 error 的记录。
+    last_trigger_ts:尾部是 turn.prompt/llm.request(已发请求、首个内容
+    尚未返回)时置位,供等待检测;内容一到或 step.end 落地即清零。
+    """
+    groups, err_ts = [], []
+    cur, last_trigger_ts = None, None
+    for line in lines:
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        t, ts = r.get("type"), kimi_ts(r.get("time"))
+        et = (r.get("event") or {}).get("type") if t == "context.append_loop_event" else None
+        if t == "llm.request":
+            cur = {"start": ts, "model": r.get("model") or "kimi"}
+            if ts:
+                last_trigger_ts = ts
+        elif t == "turn.prompt":
+            if ts:
+                last_trigger_ts = ts
+        elif et == "step.end":
+            u = (r.get("event") or {}).get("usage") or {}
+            out = u.get("output") or 0
+            if cur and cur["start"] and ts and out:
+                groups.append({"id": (r.get("event") or {}).get("messageId"),
+                               "start": cur["start"], "end": ts, "out": out,
+                               "model": cur["model"],
+                               "inp": u.get("inputOther") or 0,
+                               "cr": u.get("inputCacheRead") or 0,
+                               "cc": u.get("inputCacheCreation") or 0})
+            cur = None
+            last_trigger_ts = None
+        elif et == "content.part":
+            last_trigger_ts = None  # 首个返回内容到达 → 不再算「等待首字」
+        if ts and ("error" in str(t).lower() or "error" in str(et).lower()):
+            err_ts.append(ts)
+    return ([g for g in groups if g["end"] > g["start"]],
+            err_ts, last_trigger_ts)
+
+
+def kimi_agent_paths(session_dir):
+    """Kimi 子代理 wire:<sessionDir>/agents/agent-*/wire.jsonl(平铺布局)。"""
+    return sorted(glob.glob(os.path.join(session_dir, "agents",
+                                         "agent-*", "wire.jsonl")))
+
+
+def kimi_session_labels():
+    """session_index.jsonl → {sessionDir: 项目短标签}(workDir 的 basename)。"""
+    labels = {}
+    try:
+        with open(os.path.join(os.path.dirname(KIMI_ROOT),
+                               "session_index.jsonl")) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                sd, wd = r.get("sessionDir"), r.get("workDir")
+                if sd and wd:
+                    labels[sd] = os.path.basename(str(wd).rstrip("/"))
+    except OSError:
+        pass
+    return labels
+
+
+def kimi_recent_files():
+    """近期活跃的 Kimi Code 会话(布局 sessions/<wd_key>/<sessionId>/agents/main/wire.jsonl)。
+    活跃时间取 max(主 wire, 最新子代理 wire)——同 Claude 的 recent_files:
+    后台子代理跑着时主 wire 静默,只看主文件会把在烧的会话判成闲置。
+    返回 [(活跃时间, 主 wire 路径, 会话目录, 子代理路径列表)]。"""
+    now, found = time.time(), []
+    for p in glob.glob(os.path.join(KIMI_ROOT, "*", "*",
+                                    "agents", "main", "wire.jsonl")):
+        try:
+            eff = os.path.getmtime(p)
+        except OSError:
+            continue
+        sdir = os.path.dirname(os.path.dirname(os.path.dirname(p)))
+        agents = kimi_agent_paths(sdir)
+        for a in agents:
+            try:
+                eff = max(eff, os.path.getmtime(a))
+            except OSError:
+                continue
+        if now - eff < SCAN_WINDOW:
+            found.append((eff, p, sdir, agents))
+    found.sort(key=lambda t: t[0], reverse=True)
+    return found[:MAX_SESSIONS]
+
+
+def kimi_label_fallback(sdir):
+    """session_index 缺失时从 workDirKey 目录名推标签:wd_<slug>_<hash12> → slug。"""
+    key = os.path.basename(os.path.dirname(sdir))
+    if key.startswith("wd_"):
+        head, sep, tail = key[3:].rpartition("_")
+        if sep and len(tail) == 12 and all(c in "0123456789abcdef"
+                                           for c in tail.lower()):
+            return head
+        return key[3:]
+    return key or "kimi"
+
+
+# ---- OpenCode Desktop/CLI 数据源(SQLite；二者共用同一数据库) ----
+
+
+def _opencode_ms(v):
+    """OpenCode 持久化时间是 epoch 毫秒；坏值返回 None。"""
+    try:
+        n = float(v)
+        return n if n >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _opencode_int(v):
+    try:
+        return max(0, int(float(v)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _opencode_interval_ms(intervals, lo, hi):
+    """区间并集在 [lo,hi] 内的长度(ms)，重叠工具不重复扣时。"""
+    clipped = sorted((max(lo, a), min(hi, b)) for a, b in intervals
+                     if a is not None and b is not None
+                     and min(hi, b) > max(lo, a))
+    total, cur_a, cur_b = 0.0, None, None
+    for a, b in clipped:
+        if cur_a is None:
+            cur_a, cur_b = a, b
+        elif a <= cur_b:
+            cur_b = max(cur_b, b)
+        else:
+            total += cur_b - cur_a
+            cur_a, cur_b = a, b
+    if cur_a is not None:
+        total += cur_b - cur_a
+    return total
+
+
+def opencode_parse(messages, parts):
+    """OpenCode message/part metadata → (groups, err_ts, last_trigger_ts)。
+
+    messages/parts 是从 SQLite 投影出的轻量 dict，不含正文或工具输出。
+    一个 completed assistant message 即一次模型响应。OpenCode 的 completed
+    会等本地工具执行完才写，因此生成边界取最后 text/reasoning end 或最后
+    tool start，并从边界前耗时中扣掉已执行工具区间的并集。
+    """
+    by_message = {}
+    for p in parts:
+        mid = p.get("message_id") or p.get("messageID")
+        if mid:
+            by_message.setdefault(mid, []).append(p)
+
+    def created_of(m):
+        return _opencode_ms(m.get("created") if "created" in m
+                            else (m.get("time") or {}).get("created"))
+
+    groups, err_ts, last_trigger_ts = [], [], None
+    for m in sorted(messages, key=lambda x: (created_of(x) or 0,
+                                              str(x.get("id") or ""))):
+        role = m.get("role")
+        created = created_of(m)
+        if role == "user":
+            if created is not None:
+                last_trigger_ts = created / 1000.0
+            continue
+        if role != "assistant":
+            continue
+
+        ps = by_message.get(m.get("id"), [])
+        completed = _opencode_ms(
+            m.get("completed") if "completed" in m
+            else (m.get("time") or {}).get("completed"))
+        failed = m.get("error") is not None or m.get("finish") == "error"
+        if failed:
+            ets = completed if completed is not None else created
+            if ets is not None:
+                err_ts.append(ets / 1000.0)
+
+        # 未收尾 assistant 已出现正文/推理/工具调用就不再算「等待首字」。
+        content_seen = any(p.get("type") in ("text", "reasoning", "tool")
+                           for p in ps)
+        if completed is None and not failed:
+            if content_seen:
+                last_trigger_ts = None
+            elif created is not None:
+                last_trigger_ts = created / 1000.0
+            continue
+        last_trigger_ts = None
+        if failed or created is None or completed is None or completed <= created:
+            continue
+
+        tokens = m.get("tokens") or {}
+        cache = tokens.get("cache") or {}
+        out = (_opencode_int(tokens.get("output"))
+               + _opencode_int(tokens.get("reasoning")))
+        if not out:
+            continue
+
+        boundaries, tool_intervals = [], []
+        for p in ps:
+            typ = p.get("type")
+            start = _opencode_ms(p.get("start"))
+            end = _opencode_ms(p.get("end"))
+            if typ in ("text", "reasoning"):
+                if end is not None:
+                    boundaries.append(end)
+                elif start is not None:
+                    boundaries.append(start)
+            elif typ == "tool":
+                # state.time.start = 工具调用参数已经由模型完整产出、执行将开始。
+                if start is not None:
+                    boundaries.append(start)
+                if start is not None and end is not None and end > start:
+                    tool_intervals.append((start, end))
+
+        # 缺少 part timing 的旧/未知 schema 谨慎回退 completed；正常格式下
+        # boundary 是最后一个模型内容事件，不包含尾随 step-finish 记账。
+        boundary = min(completed, max(boundaries)) if boundaries else completed
+        if boundary <= created:
+            continue
+        tool_ms = _opencode_interval_ms(tool_intervals, created, boundary)
+        duration = (boundary - created - tool_ms) / 1000.0
+        if duration <= 0:
+            continue
+
+        provider = str(m.get("provider") or m.get("providerID") or "unknown")
+        model = str(m.get("model") or m.get("modelID") or "opencode")
+        actual_end = completed / 1000.0
+        groups.append({
+            "id": m.get("id"),
+            # end 留实际完成时刻供活跃排序；start 平移后仍保证差值=纯响应耗时。
+            "start": actual_end - duration,
+            "end": actual_end,
+            "gen_end": boundary / 1000.0,
+            "out": out,
+            "model": "opencode:%s/%s" % (provider, model),
+            "inp": _opencode_int(tokens.get("input")),
+            "cr": _opencode_int(cache.get("read")),
+            "cc": _opencode_int(cache.get("write")),
+        })
+    return groups, err_ts, last_trigger_ts
+
+
+def _opencode_connect(path):
+    """以 URI mode=ro 打开 WAL 数据库；缺库绝不创建文件。"""
+    if not path or path == ":memory:" or not os.path.isfile(path):
+        return None
+    uri = "file:%s?mode=ro" % quote(os.path.abspath(path), safe="/")
+    try:
+        db = sqlite3.connect(uri, uri=True, timeout=0.05)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA query_only = ON")
+        db.execute("PRAGMA busy_timeout = 50")
+        return db
+    except sqlite3.Error:
+        try:
+            db.close()
+        except (UnboundLocalError, sqlite3.Error):
+            pass
+        return None
+
+
+def _opencode_agent_metrics(children, parsed, now):
+    """OpenCode parent_id 子会话 → 活跃数、燃烧率、两阶段拟合点。"""
+    active = sorted(
+        (c for c in children if now - c["mtime"] <= AGENT_ACTIVE_WINDOW),
+        key=lambda c: c["mtime"], reverse=True)
+    out_sum, pts = 0.0, []
+    for child in active[:AGENT_MAX_READ]:
+        for g in parsed.get(child["id"], ([], [], None))[0]:
+            dur = g["end"] - g["start"]
+            if plausible_point(g["out"], dur):
+                pts.append((g.get("model"), g["out"], dur))
+            gen_end = g.get("gen_end", g["end"])
+            gen_start = gen_end - dur
+            if now - gen_end <= AGENT_BURN_WINDOW:
+                frac = min(1.0, (gen_end - max(gen_start,
+                                               now - AGENT_BURN_WINDOW)) / dur)
+                if frac > 0:
+                    out_sum += g["out"] * frac
+    return len(active), out_sum / AGENT_BURN_WINDOW, pts
+
+
+def opencode_recent_sessions(now=None):
+    """只读 OpenCode SQLite，返回可直接并入 main() 的 root 会话。
+
+    先扫轻量 session 表找近期 ID，再按 session_id 的索引各取末 200 条 message；
+    part 只由 SQLite JSON 投影出 type/time/status，绝不把正文和工具输出搬进内存。
+    任一 schema/锁/坏 JSON 异常都把该源降级为空，不影响另外三个数据源。
+    """
+    now = time.time() if now is None else now
+    db = _opencode_connect(OPENCODE_DB)
+    if db is None:
+        return []
+    try:
+        threshold = int((now - SCAN_WINDOW) * 1000)
+        rows = db.execute(
+            "SELECT id,parent_id,directory,time_updated FROM session "
+            "WHERE time_updated>=? ORDER BY time_updated DESC LIMIT ?",
+            (threshold, OPENCODE_MAX_SESSIONS),
+        ).fetchall()
+        sessions_by_id = {
+            r["id"]: {"id": r["id"], "parent_id": r["parent_id"],
+                      "directory": r["directory"] or "",
+                      "mtime": (_opencode_ms(r["time_updated"]) or 0) / 1000.0}
+            for r in rows
+        }
+
+        # 近期 child 的 root 可能自身已静默超过 2h；把 parent 链补齐再聚合。
+        for _ in range(8):
+            missing = sorted({s["parent_id"] for s in sessions_by_id.values()
+                              if s["parent_id"] and s["parent_id"] not in sessions_by_id})
+            if not missing:
+                break
+            marks = ",".join("?" for _ in missing)
+            parents = db.execute(
+                "SELECT id,parent_id,directory,time_updated FROM session WHERE id IN (%s)"
+                % marks, missing).fetchall()
+            if not parents:
+                break
+            for r in parents:
+                sessions_by_id[r["id"]] = {
+                    "id": r["id"], "parent_id": r["parent_id"],
+                    "directory": r["directory"] or "",
+                    "mtime": (_opencode_ms(r["time_updated"]) or 0) / 1000.0,
+                }
+
+        messages_by_session, all_messages, assistant_ids = {}, [], []
+        for sid in sessions_by_id:
+            mrows = db.execute(
+                "SELECT id,session_id,time_created,time_updated,data FROM message "
+                "WHERE session_id=? ORDER BY time_created DESC,id DESC LIMIT ?",
+                (sid, OPENCODE_MAX_MESSAGES),
+            ).fetchall()
+            msgs = []
+            for r in reversed(mrows):
+                try:
+                    data = json.loads(r["data"])
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                data = dict(data)
+                data["id"] = r["id"]
+                data["session_id"] = sid
+                timing = data.get("time") or {}
+                data["created"] = timing.get("created", r["time_created"])
+                if "completed" in timing:
+                    data["completed"] = timing["completed"]
+                msgs.append(data)
+                all_messages.append(data)
+                if data.get("role") == "assistant":
+                    assistant_ids.append(r["id"])
+            messages_by_session[sid] = msgs
+
+        parts = []
+        for off in range(0, len(assistant_ids), 400):
+            ids = assistant_ids[off:off + 400]
+            if not ids:
+                continue
+            marks = ",".join("?" for _ in ids)
+            # CASE(json_valid) 保证单条损坏 JSON 不让整轮刷新失败。
+            prows = db.execute(
+                "SELECT message_id,"
+                " CASE WHEN json_valid(data) THEN json_extract(data,'$.type') END AS type,"
+                " CASE WHEN json_valid(data) THEN COALESCE(json_extract(data,'$.time.start'),"
+                " json_extract(data,'$.state.time.start')) END AS start,"
+                " CASE WHEN json_valid(data) THEN COALESCE(json_extract(data,'$.time.end'),"
+                " json_extract(data,'$.state.time.end')) END AS end,"
+                " CASE WHEN json_valid(data) THEN json_extract(data,'$.state.status') END AS status"
+                " FROM part WHERE message_id IN (%s)" % marks, ids).fetchall()
+            parts.extend({"message_id": r["message_id"], "type": r["type"],
+                          "start": r["start"], "end": r["end"],
+                          "status": r["status"]} for r in prows if r["type"])
+    except (sqlite3.Error, KeyError, TypeError, ValueError):
+        return []
+    finally:
+        db.close()
+
+    parts_by_session = {}
+    owner = {m.get("id"): m.get("session_id") for m in all_messages}
+    for p in parts:
+        sid = owner.get(p["message_id"])
+        if sid:
+            parts_by_session.setdefault(sid, []).append(p)
+    parsed = {sid: opencode_parse(messages_by_session.get(sid, []),
+                                  parts_by_session.get(sid, []))
+              for sid in sessions_by_id}
+
+    def root_id(sid):
+        seen = set()
+        while sid in sessions_by_id and sid not in seen:
+            seen.add(sid)
+            parent = sessions_by_id[sid]["parent_id"]
+            if not parent or parent not in sessions_by_id:
+                return sid
+            sid = parent
+        return sid
+
+    descendants = {}
+    for sid, s in sessions_by_id.items():
+        rid = root_id(sid)
+        if sid != rid:
+            descendants.setdefault(rid, []).append(s)
+
+    result = []
+    roots = [s for sid, s in sessions_by_id.items() if root_id(sid) == sid]
+    for root in roots:
+        children = descendants.get(root["id"], [])
+        effective = max([root["mtime"]] + [c["mtime"] for c in children])
+        n_ag, burn, apts = _opencode_agent_metrics(children, parsed, now)
+        groups, err_ts, trig_ts = parsed.get(root["id"], ([], [], None))
+        wait = None
+        if trig_ts and WAIT_MIN < now - trig_ts <= WAIT_MAX:
+            wait = int(now - trig_ts)
+        directory = str(root["directory"] or "").rstrip("/")
+        label = os.path.basename(directory) or "opencode"
+        result.append({"mtime": effective, "label": label[:16],
+                       "groups": groups, "err_ts": err_ts, "wait": wait,
+                       "agents": (n_ag, burn), "agent_points": apts})
+    result.sort(key=lambda s: s["mtime"], reverse=True)
+    return result[:MAX_SESSIONS]
+
+
 def fmt_ago(sec):
     return "%d分" % (sec // 60) if sec >= 60 else "%d秒" % sec
 
@@ -488,7 +961,51 @@ def main():
                          "groups": groups, "err_ts": err_ts, "wait": wait,
                          "agents": (0, 0.0)})
 
-    # 两源合并后按活跃时间取最活跃的 MAX_SESSIONS 个
+    # ---- Kimi Code 会话:wire.jsonl 解析出同构的组,下游流水线全部复用 ----
+    klabels = kimi_session_labels()
+    for eff, path, sdir, agent_paths in kimi_recent_files():
+        groups, err_ts, trig_ts = kimi_parse(tail_lines(path))
+        wait = None
+        if trig_ts and WAIT_MIN < now - trig_ts <= WAIT_MAX:
+            wait = int(now - trig_ts)
+        n_ag, burn, apts = agent_metrics(
+            agent_paths, now, parse=lambda lines: kimi_parse(lines)[0])
+        # 入榜规则与 Claude 段一致:近期响应 / 等待中 / 近期错误 / 代理在跑
+        has_recent = bool(groups) and now - groups[-1]["end"] < SCAN_WINDOW
+        has_err = any(now - e <= ERR_ROW_WINDOW for e in err_ts)
+        if not has_recent and wait is None and not has_err and not n_ag:
+            continue
+        for g in groups:
+            d = g["end"] - g["start"]
+            if plausible_point(g["out"], d):
+                pool.setdefault(g.get("model"), []).append((g["out"], d))
+        for mdl, out, d in apts:  # 子代理响应与主链同构,并入同模型点池
+            pool.setdefault(mdl, []).append((out, d))
+        sessions.append({"mtime": eff,
+                         "label": (klabels.get(sdir)
+                                   or kimi_label_fallback(sdir))[:16],
+                         "groups": groups, "err_ts": err_ts, "wait": wait,
+                         "agents": (n_ag, burn)})
+
+    # ---- OpenCode Desktop/CLI:二者共用 SQLite；root 会话与 parent_id 子代理聚合 ----
+    for oc in opencode_recent_sessions(now):
+        groups, err_ts = oc["groups"], oc["err_ts"]
+        n_ag, burn = oc["agents"]
+        has_recent = bool(groups) and now - groups[-1]["end"] < SCAN_WINDOW
+        has_err = any(now - e <= ERR_ROW_WINDOW for e in err_ts)
+        if not has_recent and oc["wait"] is None and not has_err and not n_ag:
+            continue
+        for g in groups:
+            d = g["end"] - g["start"]
+            if plausible_point(g["out"], d):
+                pool.setdefault(g.get("model"), []).append((g["out"], d))
+        for mdl, out, d in oc.get("agent_points", []):
+            pool.setdefault(mdl, []).append((out, d))
+        sessions.append({"mtime": oc["mtime"], "label": oc["label"],
+                         "groups": groups, "err_ts": err_ts,
+                         "wait": oc["wait"], "agents": (n_ag, burn)})
+
+    # 多源合并后按活跃时间取最活跃的 MAX_SESSIONS 个
     sessions.sort(key=lambda s: s["mtime"], reverse=True)
     sessions = sessions[:MAX_SESSIONS]
 
@@ -590,7 +1107,7 @@ def main():
             segs.append("%s前" % fmt_ago(now - r["end"]))
         print("%s  %s" % (head, "  ".join(segs)))
     if not rows:
-        print("近2小时无 Claude 响应")
+        print("近2小时无响应")
 
 
 if __name__ == "__main__":

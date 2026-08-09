@@ -132,6 +132,130 @@ def codex_crossturn_poison(t, tps, ttft):
             + codex_turn(t + 100, 500, tps, ttft, closed=True))   # 边界 + 干净轮
 
 
+# ---------- Kimi Code wire 记录 ----------
+
+def km(off, typ, **fields):
+    r = {"type": typ,
+         "time": str(int((REF + timedelta(seconds=off)).timestamp() * 1000))}
+    r.update(fields)
+    return r
+
+
+def km_step(t, out, tps, ttft, model="k3", inp=100, cr=9000, cc=50):
+    """一步 = 一次 API 响应:llm.request → content.part → step.end。
+    dur = step.end.time − llm.request.time = ttft + out/tps(端到端,含 TTFT)。"""
+    end = t + ttft + out / tps
+    return [km(t, "llm.request", kind="loop", model=model,
+               modelAlias="kimi-code/" + model),
+            km(t + ttft, "context.append_loop_event",
+               event={"type": "content.part"}),
+            km(end, "context.append_loop_event",
+               event={"type": "step.end", "finishReason": "end_turn",
+                      "messageId": "msg%d" % int(t * 10),
+                      "usage": {"inputOther": inp, "output": out,
+                                "inputCacheRead": cr,
+                                "inputCacheCreation": cc}})]
+
+
+def kimi_steady(tps, ttft, outs, model="k3", gap=60, t0=0):
+    """稳态会话:turn.prompt → 一步响应,每步 dur = ttft + out/tps。"""
+    recs, t = [], t0
+    for out in outs:
+        recs.append(km(t, "turn.prompt"))
+        recs += km_step(t + 0.1, out, tps, ttft, model=model)
+        t += gap
+    return recs
+
+
+def kimi_retry_poison(t, tps, ttft, out=600):
+    """失败请求(无 step.end)+ 30s 后重试成功:锚点必须取重试的 llm.request——
+    若错从首请求起算,dur 掺入 30s 重试间隔(dur/out≈0.07 不过滤),成假慢点。"""
+    return ([km(t, "llm.request", kind="loop", model="k3",
+                modelAlias="kimi-code/k3")]
+            + km_step(t + 30, out, tps, ttft))
+
+
+# ---------- OpenCode 归一化 SQLite 投影 ----------
+
+REF_MS = int(REF.timestamp() * 1000)
+
+
+def oc_ms(off):
+    return REF_MS + int(round(off * 1000))
+
+
+def oc_message(mid, created, completed, output, reasoning,
+               provider="anthropic", model="claude-sonnet-4-5",
+               inp=100, cr=9000, cc=50):
+    """opencode_parse 的 message 输入口径；JSONL 用 table 标记来源表。"""
+    return {"table": "message", "id": mid, "role": "assistant",
+            "created": oc_ms(created), "completed": oc_ms(completed),
+            "provider": provider, "model": model,
+            "tokens": {"input": inp, "output": output,
+                       "reasoning": reasoning,
+                       "cache": {"read": cr, "write": cc}}}
+
+
+def oc_part(mid, typ, start, end=None, status=None):
+    """opencode_parse 的 part 输入口径；tool state.time 已摊平为 start/end。"""
+    return {"table": "part", "message_id": mid, "type": typ,
+            "start": oc_ms(start),
+            "end": oc_ms(end) if end is not None else None,
+            "status": status}
+
+
+# 每组的真值 out 是 output + reasoning；二者都非零，防止回归成只读 output。
+OPENCODE_TOKENS = [(136, 34), (340, 85), (680, 170),
+                   (1088, 272), (1700, 425), (2380, 595)]
+
+
+def opencode_steady(tps, ttft, token_pairs=OPENCODE_TOKENS,
+                    provider="anthropic", model="claude-sonnet-4-5",
+                    gap=90, t0=0):
+    """稳态 completed assistant messages：duration=ttft+(output+reasoning)/tps。"""
+    recs, t = [], t0
+    for i, (output, reasoning) in enumerate(token_pairs):
+        out = output + reasoning
+        end = t + ttft + out / tps
+        mid = "oc-steady-%d" % i
+        recs.append(oc_message(mid, t, end, output, reasoning,
+                               provider=provider, model=model))
+        recs.append(oc_part(mid, "text", t + ttft, end))
+        t += gap
+    return recs
+
+
+def opencode_tool_time(tps, ttft, token_pairs=OPENCODE_TOKENS,
+                       provider="anthropic", model="claude-sonnet-4-5",
+                       gap=180, t0=0):
+    """每组都有前序工具和末尾工具，正确解析后仍落在稳态真值上。
+
+    boundary = 最后一个 tool start。boundary 前的首个工具执行区间必须扣除；
+    末尾工具和 completed 前的尾随记账均不属于生成。各段耗时随 out 增长，
+    因而漏扣工具或误用 completed 会系统性改变斜率/截距，而非成为单个离群点。
+    """
+    prior_secs = [5, 10, 20, 32, 50, 70]
+    final_secs = [4, 7, 12, 19, 29, 43]
+    trailing_secs = [2, 4, 7, 11, 17, 25]
+    recs, t = [], t0
+    for i, ((output, reasoning), prior, final, trailing) in enumerate(
+            zip(token_pairs, prior_secs, final_secs, trailing_secs)):
+        out = output + reasoning
+        pure_generation = ttft + out / tps
+        first_start = t + ttft + 0.5
+        first_end = first_start + prior
+        boundary = t + pure_generation + prior
+        completed = boundary + final + trailing
+        mid = "oc-tool-%d" % i
+        recs.append(oc_message(mid, t, completed, output, reasoning,
+                               provider=provider, model=model))
+        recs.append(oc_part(mid, "tool", first_start, first_end, "completed"))
+        recs.append(oc_part(mid, "tool", boundary, boundary + final,
+                            "completed"))
+        t += gap
+    return recs
+
+
 # ---------- 夹具集 ----------
 
 def build():
@@ -154,6 +278,15 @@ def build():
         # 病理:跨轮合并丢弃(轮次边界)
         "codex-cross-turn": (codex_steady(90, 4, [150, 400, 800, 1400, 2200, 3000])
                              + codex_crossturn_poison(700, 90, 4)),
+        # Kimi 主标定
+        "kimi-steady-80x6": kimi_steady(80, 6, [120, 350, 700, 1100, 1700, 2400]),
+        # 病理:失败请求无 step.end,锚点取重试的 llm.request
+        "kimi-retry": (kimi_steady(80, 6, [120, 350, 700, 1100, 1700, 2400])
+                       + kimi_retry_poison(700, 80, 6)),
+        # OpenCode 主标定:out 明确包含 output + reasoning
+        "opencode-steady-85x5": opencode_steady(85, 5),
+        # 病理:扣除前序工具区间，最后 tool start 是生成边界
+        "opencode-tool-time": opencode_tool_time(85, 5),
     }
 
 

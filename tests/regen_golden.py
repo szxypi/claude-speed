@@ -25,7 +25,7 @@ REPO = os.path.dirname(HERE)
 FIX = os.path.join(HERE, "fixtures")
 
 # 人工权威来源:改标准从这里改(以及 gen_fixtures.py 的原始字节)
-METRIC_VERSION = "1.0"
+METRIC_VERSION = "1.2"
 DRIFT_TOL = {"tps": 0.5, "ttft": 0.2}
 CALIB_TOL = {"tps_rel": 0.03, "ttft_abs": 0.5}
 SPEC = [
@@ -45,7 +45,29 @@ SPEC = [
      "病理:瞬时组(毫秒时间戳簇)被 plausible_point 过快界过滤,读数落回真值"),
     ("codex-cross-turn", "codex", (90.0, 4.0),
      "病理:未收尾轮在边界丢弃,不与下轮合并,读数落回真值"),
+    ("kimi-steady-80x6", "kimi", (80.0, 6.0),
+     "Kimi 主标定:6 条稳态响应,真值 TPS=80 TTFT=6s"),
+    ("kimi-retry", "kimi", (80.0, 6.0),
+     "病理:失败请求无 step.end,锚点取重试的 llm.request,读数落回真值"),
+    ("opencode-steady-85x5", "opencode", (85.0, 5.0),
+     "OpenCode 主标定:6 条稳态响应,out=output+reasoning,真值 TPS=85 TTFT=5s"),
+    ("opencode-tool-time", "opencode", (85.0, 5.0),
+     "病理:扣除前序工具执行区间,以最后 tool start 为生成边界,读数落回真值"),
 ]
+
+
+def opencode_groups(cs, lines):
+    """归一化 JSONL 按 SQLite 来源表拆开后交给 OpenCode 解析器。"""
+    records = [json.loads(line) for line in lines]
+    messages = [r for r in records if r.get("table") == "message"]
+    parts = [r for r in records if r.get("table") == "part"]
+    return cs.opencode_parse(messages, parts)[0]
+
+
+PARSERS = {"claude": lambda cs, lines: cs.response_groups(lines)[0],
+           "codex": lambda cs, lines: cs.codex_parse(lines)[0],
+           "kimi": lambda cs, lines: cs.kimi_parse(lines)[0],
+           "opencode": opencode_groups}
 
 
 def load_cs():
@@ -58,8 +80,7 @@ def load_cs():
 def measure(cs, name, source):
     """读冻结夹具 → 解析 → 当前模型组 → fit_speed。返回 (groups数, reading)。"""
     lines = open(os.path.join(FIX, name + ".jsonl")).read().splitlines()
-    groups = (cs.response_groups(lines)[0] if source == "claude"
-              else cs.codex_parse(lines)[0])
+    groups = PARSERS[source](cs, lines)
     fit = cs.fit_speed(cs.current_model_groups(groups))
     if fit is None:
         reading = None

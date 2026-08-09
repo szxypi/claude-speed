@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/JuDaXia/claude-speed/actions/workflows/ci.yml/badge.svg)
 
-**看见 Claude Code 的真实生成速度。** macOS 菜单栏应用 + 终端 statusline，把回复的**真·生成速度（tok/s）**和**首字延迟（TTFT）**拆开显示——后者才是真正在波动的东西。
+**看见编码代理的真实生成速度。** macOS 菜单栏应用 + Claude Code 终端 statusline，把每次回复的**真·生成速度（tok/s）**和**首字延迟（TTFT）**拆开显示——后者才是真正在波动的东西。
 
 [English docs →](README.md)
 
@@ -32,11 +32,11 @@ claude-speed 对近期响应拟合 `耗时 ≈ TTFT + token数/TPS`（Theil-Sen 
 
 | 文件 | 作用 |
 |---|---|
-| `collect.py` | 采集核心：扫 `~/.claude/projects/` 活跃会话 transcript，输出「首行=菜单栏标题，其余行=下拉明细」 |
+| `collect.py` | 采集核心：扫描 Claude Code、Codex CLI、Kimi Code 与 OpenCode 的活跃会话，输出「首行=菜单栏标题，其余行=下拉明细」 |
 | `main.swift` → `ClaudeSpeed` | 菜单栏应用（零第三方依赖，`swiftc` 直编），每 3s 刷新 |
 | `statusline-speed.py` | [Claude Code statusline](https://docs.anthropic.com/en/docs/claude-code/statusline) 脚本——同一套算法，渲染成输入框下方一行 ANSI 彩色文本 |
 
-覆盖所有客户端（CLI、桌面 App、VS Code 插件都写同一份 transcript）。只读本地文件，无任何网络请求。
+覆盖所有 Claude Code 客户端（CLI、桌面 App、VS Code 插件都写同一份 transcript）；菜单栏合并 **Claude Code、Codex CLI、Kimi Code 与 OpenCode Desktop/CLI** 四类会话（见「测速算法」）。OpenCode 没有 statusline 接线，`--statusline` 仍只服务 Claude Code。所有数据都在本地只读，无任何网络请求。
 
 ## 安装
 
@@ -50,10 +50,11 @@ git clone https://github.com/JuDaXia/claude-speed && cd claude-speed
 
 需要 Xcode Command Line Tools（`xcode-select --install`）和 python3。
 
-**装完立刻能看到什么：菜单栏出现 `⚪` 图标**（闲置——还没有活跃会话）。随便开个 Claude Code 会话问点东西，几秒后变成 `🟢71` 这样的实时读数；带 `--statusline` 装的话，速度行会在 Claude Code 输入框下方随下次刷新出现——无需重启。如果什么都没出现，跑 `./collect.py`：它打印的就是菜单栏该显示的内容，排障入口。
+**装完立刻能看到什么：菜单栏出现 `⚪` 图标**（闲置——还没有活跃会话）。随便开个 Claude Code 或 OpenCode Desktop 会话问点东西，几秒后变成 `🟢71` 这样的实时读数；带 `--statusline` 装的话，速度行会在 Claude Code 输入框下方随下次刷新出现——无需重启。如果什么都没出现，跑 `./collect.py`：它打印的就是菜单栏该显示的内容，排障入口。
 
 注意：
 - LaunchAgent 指向 clone 目录——clone 到哪都行，但之后**挪了目录要重跑 `install.sh`**；
+- 如果 OpenCode 使用自定义 `XDG_DATA_HOME` 或 `OPENCODE_DB`，`install.sh` 会把当前值写入 LaunchAgent；变量改变后需重跑安装；
 - `--statusline` 修改 `~/.claude/settings.json` 前会自动备份成 `.bak`；
 - **更新**：`git pull && ./install.sh`（幂等——重编译并重启）。
 
@@ -81,7 +82,7 @@ git clone https://github.com/JuDaXia/claude-speed && cd claude-speed
 
 标题刻意保持最简——等待类指示只进下拉：`⏳等N秒` 在请求等待期间实时上涨（>120s 视为已中断自动消失），还没有任何响应的会话显示「等待首个响应」。
 
-下拉每行一个活跃会话（最多 4 个，近 2 小时，**Claude Code 与 Codex CLI 合并排序**）：
+下拉每行一个活跃会话（最多 4 个，近 2 小时，**Claude Code、Codex CLI、Kimi Code 与 OpenCode 合并排序**）：
 
 ```
 myproject·fable5  🟢 71 tok/s 首字4s  缓存12%冷  ⚠️1错  最近1022tok·22s  4秒前
@@ -102,6 +103,8 @@ statusline 颜色：速度 绿≥50/黄≥30/红<30 · 首字 绿≤5s/黄≤12s
 - **诚实回退**：再不行时，长回复（≥300tok）的 blended 速度按**下界** `≥N` 显示（下界过绿线才亮绿灯）；否则「速度样本不足」。大文件只尾读 400KB，坏行静默跳过；
 - **后台子代理监控**：调研/Task 类后台任务写在 `<会话>/subagents/agent-*.jsonl`，主 transcript 期间静默——因此会话活跃时间取 `max(主transcript, 最新子代理)`，后台干活不会被误判成闲置。近 90 秒有写入的代理算活跃，其近 2 分钟合计产出即舰队燃烧率（`🤖N Σtok/s`），代理的响应样本同时并入跨会话点池参与两阶段拟合；
 - **Codex CLI 支持**（仅菜单栏）：Codex 会话在 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`，每次 API 响应流式写内容记录、以带完整 usage 的 `token_count` 事件收尾。组 start = 首条内容记录的前一条记录时间戳（含 TTFT，与 Claude 语义一致）；组 end = **最后一条内容记录**而非 `token_count`——后者在工具执行完才发出，会把工具耗时算进生成时间。模型取 `turn_context`、项目标签取 `session_meta.cwd`、缓存命中率 = `cached_input_tokens/input_tokens`。下游拟合/滑窗/显示全部复用。文件被碰过但内容陈旧的僵尸会话不入榜。
+- **Kimi Code 支持**（仅菜单栏——Kimi Code 没有 statusline 机制）：会话在 `~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/main/wire.jsonl`（数据根可用 `KIMI_CODE_HOME` 重定位）。一次 API 响应 = `llm.request` 记录与其收尾的 `step.end` 事件配对（后者带完整 usage）。组 start = `llm.request` 的 time（它本身就是请求发出时刻）；组 end = `step.end` 的 time；wire 的 `time` 字段是 epoch 毫秒字符串。重试（`step.end` 前出现新的 `llm.request`）锚点取重试时刻，与 Claude 的错误锚点规则一致。usage 一一对应（`inputOther`/`inputCacheRead`/`inputCacheCreation`）；模型取 `llm.request.model`；项目标签取 `session_index.jsonl` 的 `workDir`，缺失时回退 `workDirKey` 的 slug 段。子代理在 `agents/agent-*/wire.jsonl`，同样计入舰队监控（`🤖N Σtok/s`）与斜率点池。注意：`wire.jsonl` 是未文档化的内部格式——解析器对不认识的记录一律跳过，未来格式变化只会让显示降级而不会崩溃。
+- **OpenCode Desktop 支持**（仅菜单栏——没有 statusline 接线）：OpenCode v1.18.15 的 Desktop 与 CLI 共用 XDG data 数据库 `$XDG_DATA_HOME/opencode/opencode.db`（macOS 默认 `~/.local/share/opencode/opencode.db`）；claude-speed 只读 SQLite 及其 WAL，不写入任何内容。每条已完成的 assistant message = 一次响应，`out = tokens.output + tokens.reasoning`。生成边界取最后一个 text/reasoning 的结束时间或 tool 的开始时间（旧格式缺字段时才回退 `time.completed`）；耗时从 `time.created` 算到该边界，再扣除边界前 tool state 时间区间的**并集**。这样重叠工具只扣一次，本地 `bash`/`task`/`question` 执行也不会污染生成速度。输入与缓存 usage 分别映射 `tokens.input`、`tokens.cache.read`、`tokens.cache.write`；模型键取 `providerID/modelID`，项目标签取 `session.directory`。带 `parent_id` 的子会话视作后台代理，同样进入舰队监控和跨会话斜率点池。数据库与 schema 都是未文档化的内部实现；遇到不认识的 schema 会静默跳过，只让显示降级，不让采集器崩溃。
 
 ## 运维
 
@@ -123,8 +126,8 @@ launchctl kickstart -k gui/$(id -u)/com.claude-speed.menubar
 ## 测量标准
 
 显示的速度是**估计值**、非绝对读数,其基准会随算法演进而漂移——所以定义被钉死。
-[METRIC.md](METRIC.md) 是带版本号的规范(当前 v1.0):速度的定义、锚点规则、估计器、
-全部参数。`tests/fixtures/*.jsonl` 是冻结的 transcript 字节(千克原器),`tests/golden.json`
+[METRIC.md](METRIC.md) 是带版本号的规范(当前 v1.2):速度的定义、锚点规则、估计器、
+全部参数。`tests/fixtures/*.jsonl` 是冻结的数据源记录(千克原器),`tests/golden.json`
 是它们的认证读数。每次 CI 都断言估计器仍能复现这些读数(**漂移**——任何移动了数字的
 代码改动都会让测试变红),并且仍能还原每个合成夹具的已知真值(**校准**——拦截有偏的重定标)。
 改基准是刻意行为:跑 `regen_golden.py`、review `golden.json` 的 diff、升版本号、写明漂移幅度。
@@ -135,10 +138,11 @@ launchctl kickstart -k gui/$(id -u)/com.claude-speed.menubar
 python3 -m unittest discover -s tests -v
 ```
 
-65 个测试覆盖:拟合数学(已知真值还原、离群剔除、扩窗)、菜单栏端到端场景
-(等待/错误/冷缓存/两阶段拟合/后台子代理与燃烧率折算)、以及一个 AST 级源码
-比对——强制共享算法在 `collect.py` 与 `statusline-speed.py` 间保持逐字一致。
-CI 在 macOS + Linux 跑测试,外加 `swiftc` 编译冒烟。
+测试覆盖:拟合数学(已知真值还原、离群剔除、扩窗)、数据源适配(含 OpenCode
+SQLite/WAL 解析与工具耗时扣除)、菜单栏端到端场景(等待/错误/冷缓存/两阶段拟合/
+后台子代理与燃烧率折算)、以及一个 AST 级源码比对——强制共享算法在 `collect.py`
+与 `statusline-speed.py` 间保持逐字一致。CI 在 macOS + Linux 跑测试,外加
+`swiftc` 编译冒烟。
 
 ## License
 
