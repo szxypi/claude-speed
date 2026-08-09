@@ -1,4 +1,4 @@
-# claude-speed measurement standard — METRIC v1.1
+# claude-speed measurement standard — METRIC v1.2
 
 This document is the **definition** of the number claude-speed displays — the
 written spec, like the text that defines the metre. The displayed speed is not
@@ -18,10 +18,11 @@ monitoring tool, comparability over time matters more than absolute truth.
 
 One **API response** = consecutive records that belong to a single model
 generation (Claude: same `message.id`; Codex: content records between turn
-boundaries; Kimi: one `llm.request` → `step.end` pair). For each response:
+boundaries; Kimi: one `llm.request` → `step.end` pair; OpenCode: one completed
+assistant message). For each response:
 
 - **out** = `usage.output_tokens` (the max within the group; exact. Kimi:
-  `step.end`'s `usage.output`).
+  `step.end`'s `usage.output`; OpenCode: `tokens.output + tokens.reasoning`).
 - **duration** = `end − start`, where
   - **start** = timestamp of the record immediately preceding the group's first
     content record (≈ request send time) — so duration **includes TTFT**
@@ -33,6 +34,22 @@ boundaries; Kimi: one `llm.request` → `step.end` pair). For each response:
     record, which marks response consumption complete).
   - Kimi retries: a new `llm.request` discards any unclosed earlier request —
     the anchor moves to the retry, mirroring Claude's error-anchor rule.
+  - OpenCode: start is the assistant message's `time.created`; end is the latest
+    text/reasoning `time.end` or tool-state `time.start` (falling back to
+    `time.completed` when no content timing exists). Subtract the **union** of
+    tool-state intervals before that boundary. Unioning first prevents
+    overlapping/parallel tools from being deducted twice and keeps local
+    `bash`, `task` and `question` execution time out of model-generation time.
+
+OpenCode v1.18.15 Desktop and CLI share the XDG data database at
+`$XDG_DATA_HOME/opencode/opencode.db` (`~/.local/share/opencode/opencode.db` by
+default on macOS). The database and its WAL are read-only inputs. Usage metadata
+maps from `tokens.input`, `tokens.cache.read` and `tokens.cache.write`; the model
+key is `providerID/modelID`, and the project label is `session.directory`.
+Sessions with a `parent_id` are background agents. OpenCode is a menu-bar source
+only, with no statusline wiring. Its database format and schema are internal
+implementation details; an unrecognized schema makes the source silently
+unavailable rather than failing the collector.
 
 Across a set of responses, model:
 
@@ -62,16 +79,18 @@ floor: with a ≥300-token reply, the blended rate `out/dur` is reported as a
 **lower bound** (`≥N`, since it is strictly below true TPS); otherwise
 "insufficient samples".
 
-Reasoning/thinking tokens are counted in `output_tokens` by both providers, so
-they are part of "generation" here. Codex TPS therefore includes reasoning time
-and is directly comparable to Claude's on the same basis.
+Reasoning/thinking tokens are part of "generation" here under each source's
+convention. OpenCode stores them separately, so its `out` explicitly adds
+`tokens.reasoning`.
 
 ## The physical standard
 
-`tests/fixtures/*.jsonl` are **frozen transcript bytes** — the prototype. They
-are committed and never regenerated at test time. `tests/golden.json` is their
-**certified value**: for each fixture, the estimator's reading plus, for
-synthetic ones, the known ground-truth generation parameters.
+`tests/fixtures/*.jsonl` are **frozen source-record bytes** — transcript records
+for Claude/Codex/Kimi and the deterministic message/part metadata projection
+read from SQLite for OpenCode. They are committed and never regenerated at test
+time. `tests/golden.json` is their **certified value**: for each fixture, the
+estimator's reading plus, for synthetic ones, the known ground-truth generation
+parameters.
 
 Fixtures are synthetic by design: no real transcript content (privacy), and a
 *known* true TPS/TTFT so the registry doubles as a calibration table. Pathology
@@ -87,8 +106,9 @@ that lets the poison through shifts the reading and trips the test.
    ±0.5s). Guards against a *biased* recalibration (re-pinning the registry to a
    wrong value).
 
-At METRIC v1.1 the estimator recovers every synthetic fixture's truth exactly
-(70/5, 45/8, 90/4, 80/6).
+At METRIC v1.2 the estimator recovers every synthetic fixture's truth exactly
+(70/5, 45/8, 90/4, 80/6, 85/5). All pre-v1.2 fixtures retain their certified readings
+(zero drift).
 
 ## Recalibration
 
@@ -113,6 +133,9 @@ Version history:
 - **v1.1** — added the Kimi Code source definition (`llm.request` → `step.end`
   pairing, epoch-ms `time` fields, retry anchoring). Existing Claude/Codex
   fixture readings unchanged (zero drift, verified by `regen_golden.py`).
+- **v1.2** — added the OpenCode Desktop/CLI source definition (completed
+  assistant messages, reasoning-token inclusion, and tool-interval union
+  subtraction). Existing fixtures are unchanged (zero drift).
 
 ## What this standard does not cover
 

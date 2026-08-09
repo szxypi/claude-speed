@@ -25,7 +25,7 @@ REPO = os.path.dirname(HERE)
 FIX = os.path.join(HERE, "fixtures")
 
 # 人工权威来源:改标准从这里改(以及 gen_fixtures.py 的原始字节)
-METRIC_VERSION = "1.1"
+METRIC_VERSION = "1.2"
 DRIFT_TOL = {"tps": 0.5, "ttft": 0.2}
 CALIB_TOL = {"tps_rel": 0.03, "ttft_abs": 0.5}
 SPEC = [
@@ -49,11 +49,25 @@ SPEC = [
      "Kimi 主标定:6 条稳态响应,真值 TPS=80 TTFT=6s"),
     ("kimi-retry", "kimi", (80.0, 6.0),
      "病理:失败请求无 step.end,锚点取重试的 llm.request,读数落回真值"),
+    ("opencode-steady-85x5", "opencode", (85.0, 5.0),
+     "OpenCode 主标定:6 条稳态响应,out=output+reasoning,真值 TPS=85 TTFT=5s"),
+    ("opencode-tool-time", "opencode", (85.0, 5.0),
+     "病理:扣除前序工具执行区间,以最后 tool start 为生成边界,读数落回真值"),
 ]
+
+
+def opencode_groups(cs, lines):
+    """归一化 JSONL 按 SQLite 来源表拆开后交给 OpenCode 解析器。"""
+    records = [json.loads(line) for line in lines]
+    messages = [r for r in records if r.get("table") == "message"]
+    parts = [r for r in records if r.get("table") == "part"]
+    return cs.opencode_parse(messages, parts)[0]
+
 
 PARSERS = {"claude": lambda cs, lines: cs.response_groups(lines)[0],
            "codex": lambda cs, lines: cs.codex_parse(lines)[0],
-           "kimi": lambda cs, lines: cs.kimi_parse(lines)[0]}
+           "kimi": lambda cs, lines: cs.kimi_parse(lines)[0],
+           "opencode": opencode_groups}
 
 
 def load_cs():

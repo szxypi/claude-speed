@@ -1,0 +1,18 @@
+{"table": "message", "id": "oc-tool-0", "role": "assistant", "created": 1767225600000, "completed": 1767225618000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 136, "reasoning": 34, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-tool-0", "type": "tool", "start": 1767225605500, "end": 1767225610500, "status": "completed"}
+{"table": "part", "message_id": "oc-tool-0", "type": "tool", "start": 1767225612000, "end": 1767225616000, "status": "completed"}
+{"table": "message", "id": "oc-tool-1", "role": "assistant", "created": 1767225780000, "completed": 1767225811000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 340, "reasoning": 85, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-tool-1", "type": "tool", "start": 1767225785500, "end": 1767225795500, "status": "completed"}
+{"table": "part", "message_id": "oc-tool-1", "type": "tool", "start": 1767225800000, "end": 1767225807000, "status": "completed"}
+{"table": "message", "id": "oc-tool-2", "role": "assistant", "created": 1767225960000, "completed": 1767226014000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 680, "reasoning": 170, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-tool-2", "type": "tool", "start": 1767225965500, "end": 1767225985500, "status": "completed"}
+{"table": "part", "message_id": "oc-tool-2", "type": "tool", "start": 1767225995000, "end": 1767226007000, "status": "completed"}
+{"table": "message", "id": "oc-tool-3", "role": "assistant", "created": 1767226140000, "completed": 1767226223000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 1088, "reasoning": 272, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-tool-3", "type": "tool", "start": 1767226145500, "end": 1767226177500, "status": "completed"}
+{"table": "part", "message_id": "oc-tool-3", "type": "tool", "start": 1767226193000, "end": 1767226212000, "status": "completed"}
+{"table": "message", "id": "oc-tool-4", "role": "assistant", "created": 1767226320000, "completed": 1767226446000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 1700, "reasoning": 425, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-tool-4", "type": "tool", "start": 1767226325500, "end": 1767226375500, "status": "completed"}
+{"table": "part", "message_id": "oc-tool-4", "type": "tool", "start": 1767226400000, "end": 1767226429000, "status": "completed"}
+{"table": "message", "id": "oc-tool-5", "role": "assistant", "created": 1767226500000, "completed": 1767226678000, "provider": "anthropic", "model": "claude-sonnet-4-5", "tokens": {"input": 100, "output": 2380, "reasoning": 595, "cache": {"read": 9000, "write": 50}}}
+{"table": "part", "message_id": "oc-tool-5", "type": "tool", "start": 1767226505500, "end": 1767226575500, "status": "completed"}
+{"table": "part", "message_id": "oc-tool-5", "type": "tool", "start": 1767226610000, "end": 1767226653000, "status": "completed"}

@@ -13,6 +13,7 @@ import inspect
 import io
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import textwrap
@@ -329,6 +330,45 @@ def km_session(now, tps=80.0, ttft=6.0, outs=(120, 350, 700, 1100, 1700, 2400),
     return recs
 
 
+# ---------- OpenCode SQLite 归一化记录构造 ----------
+
+def oc_message(mid, created, completed=None, role="assistant",
+               provider="anthropic", model="claude-sonnet-4-5",
+               inp=100, out=0, reasoning=0, cr=9000, cc=50, error=None):
+    """opencode_parse 的输入口径；时间均为 epoch 毫秒。"""
+    r = {"id": mid, "role": role, "created": int(created),
+         "completed": int(completed) if completed is not None else None,
+         "provider": provider, "model": model,
+         "tokens": {"input": inp, "output": out, "reasoning": reasoning,
+                    "cache": {"read": cr, "write": cc}},
+         "error": error}
+    return r
+
+
+def oc_part(mid, typ, start=None, end=None, status=None):
+    """opencode_parse 的 part 输入口径；tool 已把 state.time 摊平。"""
+    return {"message_id": mid, "type": typ,
+            "start": int(start) if start is not None else None,
+            "end": int(end) if end is not None else None,
+            "status": status}
+
+
+def oc_session(now, tps=70.0, ttft=5.0,
+               outs=(100, 400, 800, 1500, 2500), start=None, gap=60,
+               provider="anthropic", model="claude-sonnet-4-5"):
+    """构造 OpenCode 已完成 assistant 消息及其 text part。"""
+    messages, parts = [], []
+    t = start if start is not None else now - 600
+    for i, out in enumerate(outs):
+        end = t + ttft + out / tps
+        mid = "oc%d" % i
+        messages.append(oc_message(mid, t * 1000, end * 1000,
+                                   provider=provider, model=model, out=out))
+        parts.append(oc_part(mid, "text", (t + ttft) * 1000, end * 1000))
+        t += gap
+    return messages, parts
+
+
 # ---------- collect.py 独有函数 ----------
 
 class TestCollectHelpers(unittest.TestCase):
@@ -350,6 +390,9 @@ class TestCollectHelpers(unittest.TestCase):
         self.assertEqual(cs.model_tag("claude-fable-5"), "fable5")
         self.assertEqual(cs.model_tag("claude-haiku-4-5-20251001"), "haiku4.5")
         self.assertEqual(cs.model_tag("gpt-5.6-sol"), "gpt5.6sol")
+        # OpenCode 内部模型键带来源/provider 命名空间；展示只留模型短名
+        self.assertEqual(
+            cs.model_tag("opencode:anthropic/claude-sonnet-4-5"), "sonnet4.5")
         self.assertEqual(cs.model_tag(None), "")
 
 
@@ -505,6 +548,81 @@ class TestKimiParse(unittest.TestCase):
         self.assertEqual(len(groups), 1)
 
 
+class TestOpenCodeParse(unittest.TestCase):
+    def test_recovers_known_speed(self):
+        messages, parts = oc_session(time.time(), tps=70, ttft=5)
+        groups, err_ts, trig = cs.opencode_parse(messages, parts)
+        self.assertEqual(len(groups), 5)
+        self.assertEqual(err_ts, [])
+        self.assertIsNone(trig)
+        tps, ttft = cs.fit_speed(groups)
+        self.assertAlmostEqual(tps, 70, delta=2)
+        self.assertAlmostEqual(ttft, 5, delta=0.5)
+
+    def test_usage_model_and_overlapping_tool_time(self):
+        # 总墙钟 20s；两个工具区间 [2,9]、[7,15] 的并集为 13s，
+        # generation duration 应为 7s，不能把重叠的 2s 重复扣除。
+        m = oc_message("m1", 1_000_000, 1_020_000,
+                       inp=321, out=400, reasoning=25, cr=9876, cc=54)
+        parts = [oc_part("m1", "tool", 1_002_000, 1_009_000, "completed"),
+                 oc_part("m1", "tool", 1_007_000, 1_015_000, "completed"),
+                 oc_part("m1", "text", 1_019_000, 1_020_000)]
+        groups, err_ts, trig = cs.opencode_parse([m], parts)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(err_ts, [])
+        self.assertIsNone(trig)
+        g = groups[0]
+        self.assertEqual(g["id"], "m1")
+        self.assertEqual(g["out"], 425)  # 可见输出 + reasoning 都是生成 token
+        self.assertEqual(g["model"],
+                         "opencode:anthropic/claude-sonnet-4-5")
+        self.assertEqual((g["inp"], g["cr"], g["cc"]), (321, 9876, 54))
+        self.assertAlmostEqual(g["end"], 1020.0)
+        self.assertAlmostEqual(g["start"], 1013.0)
+        self.assertAlmostEqual(g["end"] - g["start"], 7.0)
+
+    def test_generation_boundary_still_deducts_earlier_tool(self):
+        # 没有 text/reasoning 时，最后一个 tool 的 start 是 generation 边界。
+        # 第一个长工具已在边界前完整发生，必须从 45s elapsed 中扣掉 30s；
+        # 第二个工具自身从边界才开始，不应混入生成时长。
+        m = oc_message("m1", 2_000_000, 2_060_000, out=600)
+        parts = [oc_part("m1", "tool", 2_005_000, 2_035_000, "completed"),
+                 oc_part("m1", "tool", 2_045_000, 2_055_000, "completed")]
+        groups, _, _ = cs.opencode_parse([m], parts)
+        self.assertEqual(len(groups), 1)
+        self.assertAlmostEqual(groups[0]["end"], 2060.0)  # 活跃时间仍取 completed
+        self.assertAlmostEqual(groups[0]["end"] - groups[0]["start"], 15.0)
+
+    def test_waiting_requires_empty_unfinished_assistant(self):
+        now_ms = int(time.time() * 1000)
+        pending = oc_message("pending", now_ms - 8000, completed=None)
+
+        # step-start 是账务边界，不是模型内容，仍处于等待首字。
+        _, _, trig = cs.opencode_parse(
+            [pending], [oc_part("pending", "step-start")])
+        self.assertAlmostEqual(trig, (now_ms - 8000) / 1000, delta=0.001)
+
+        # 任一 text/reasoning/tool part 到达，都说明已经开始响应。
+        for typ in ("text", "reasoning", "tool"):
+            with self.subTest(typ=typ):
+                part = oc_part("pending", typ, now_ms - 7000, None,
+                               "running" if typ == "tool" else None)
+                _, _, trig = cs.opencode_parse([pending], [part])
+                self.assertIsNone(trig)
+
+        completed = oc_message("done", now_ms - 8000, now_ms - 7000)
+        _, _, trig = cs.opencode_parse([completed], [])
+        self.assertIsNone(trig)
+
+    def test_error_is_reported_not_grouped(self):
+        m = oc_message("bad", 3_000_000, 3_001_000,
+                       error={"name": "ProviderError"})
+        groups, err_ts, trig = cs.opencode_parse([m], [])
+        self.assertEqual(groups, [])
+        self.assertEqual(len(err_ts), 1)
+        self.assertIsNone(trig)
+
+
 # ---------- collect.main 端到端合成场景 ----------
 
 class TestCollectMain(unittest.TestCase):
@@ -512,13 +630,22 @@ class TestCollectMain(unittest.TestCase):
         self.root = tempfile.mkdtemp()
         self.codex_root = tempfile.mkdtemp()  # 隔离,防真实 ~/.codex 漏进测试
         self.kimi_root = tempfile.mkdtemp()   # 隔离,防真实 ~/.kimi-code 漏进测试
-        self._old = (cs.ROOT, cs.CODEX_ROOT, cs.KIMI_ROOT)
+        self.opencode_root = tempfile.mkdtemp()  # 隔离真实 OpenCode SQLite
+        self.opencode_db = os.path.join(self.opencode_root, "opencode.db")
+        self._had_opencode_db = hasattr(cs, "OPENCODE_DB")
+        self._old = (cs.ROOT, cs.CODEX_ROOT, cs.KIMI_ROOT,
+                     getattr(cs, "OPENCODE_DB", None))
         cs.ROOT, cs.CODEX_ROOT, cs.KIMI_ROOT = (self.root, self.codex_root,
                                                 self.kimi_root)
+        cs.OPENCODE_DB = self.opencode_db
         self.now = time.time()
 
     def tearDown(self):
-        cs.ROOT, cs.CODEX_ROOT, cs.KIMI_ROOT = self._old
+        cs.ROOT, cs.CODEX_ROOT, cs.KIMI_ROOT = self._old[:3]
+        if self._had_opencode_db:
+            cs.OPENCODE_DB = self._old[3]
+        else:
+            del cs.OPENCODE_DB
 
     def write(self, dirname, recs, mtime=None):
         d = os.path.join(self.root, dirname)
@@ -541,6 +668,99 @@ class TestCollectMain(unittest.TestCase):
         if mtime:
             os.utime(wp, (mtime, mtime))
 
+    def create_opencode_db(self, wal=False):
+        """建立 OpenCode 正式 schema 中采集器实际依赖的最小子集。"""
+        conn = sqlite3.connect(self.opencode_db)
+        if wal:
+            self.assertEqual(conn.execute("PRAGMA journal_mode=WAL").fetchone()[0],
+                             "wal")
+            conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.executescript("""
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                parent_id TEXT,
+                directory TEXT,
+                time_updated INTEGER
+            );
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                time_created INTEGER,
+                time_updated INTEGER,
+                data TEXT
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT,
+                session_id TEXT,
+                time_created INTEGER,
+                time_updated INTEGER,
+                data TEXT
+            );
+            CREATE INDEX message_session_time_created_id_idx
+                ON message(session_id, time_created, id);
+            CREATE INDEX part_message_id_id_idx ON part(message_id, id);
+            CREATE INDEX part_session_idx ON part(session_id);
+        """)
+        conn.commit()
+        return conn
+
+    def write_opencode(self, label, messages, parts=(), updated=None,
+                       sid="ses_test", parent=None, conn=None):
+        """把归一化 fixture 还原成 OpenCode message/part 的 data JSON。"""
+        own_conn = conn is None
+        if own_conn:
+            conn = self.create_opencode_db()
+        updated_ms = (int(updated * 1000) if updated is not None else
+                      max([m.get("completed") or m["created"] for m in messages]
+                          or [int(self.now * 1000)]))
+        conn.execute("INSERT INTO session VALUES (?, ?, ?, ?)",
+                     (sid, parent, "/Users/x/" + label, updated_ms))
+        message_times = {}
+        for m in messages:
+            tm = {"created": m["created"]}
+            if m.get("completed") is not None:
+                tm["completed"] = m["completed"]
+            data = {"role": m["role"], "time": tm}
+            if m["role"] == "assistant":
+                data.update({"providerID": m.get("provider"),
+                             "modelID": m.get("model"),
+                             "tokens": m.get("tokens") or {}})
+                if m.get("error") is not None:
+                    data["error"] = m["error"]
+            mt = m.get("completed") or m["created"]
+            message_times[m["id"]] = mt
+            conn.execute("INSERT INTO message VALUES (?, ?, ?, ?, ?)",
+                         (m["id"], sid, m["created"], mt, json.dumps(data)))
+        for i, p in enumerate(parts):
+            if p["type"] == "tool":
+                state = {"status": p.get("status")}
+                pt = {}
+                if p.get("start") is not None:
+                    pt["start"] = p["start"]
+                if p.get("end") is not None:
+                    pt["end"] = p["end"]
+                if pt:
+                    state["time"] = pt
+                data = {"type": "tool", "state": state}
+            else:
+                data = {"type": p["type"]}
+                pt = {}
+                if p.get("start") is not None:
+                    pt["start"] = p["start"]
+                if p.get("end") is not None:
+                    pt["end"] = p["end"]
+                if pt:
+                    data["time"] = pt
+            pt_created = p.get("start") or message_times[p["message_id"]]
+            pt_updated = p.get("end") or pt_created
+            conn.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+                         ("prt_%s_%d" % (sid, i), p["message_id"], sid,
+                          pt_created, pt_updated, json.dumps(data)))
+        conn.commit()
+        if own_conn:
+            conn.close()
+
     def run_main(self):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -551,6 +771,34 @@ class TestCollectMain(unittest.TestCase):
         out = self.run_main()
         self.assertIn("⚪", out.splitlines()[0])
         self.assertIn("近2小时无响应", out)
+
+    def test_opencode_missing_db_is_not_created(self):
+        self.assertFalse(os.path.exists(self.opencode_db))
+        out = self.run_main()
+        self.assertFalse(os.path.exists(self.opencode_db))
+        self.assertIn("近2小时无响应", out)
+
+    def test_opencode_unknown_schema_degrades_to_empty_source(self):
+        conn = sqlite3.connect(self.opencode_db)
+        conn.execute("CREATE TABLE future_schema_only (id TEXT PRIMARY KEY)")
+        conn.close()
+        out = self.run_main()
+        self.assertIn("近2小时无响应", out)
+        self.assertNotIn("⚡?", out)
+
+    def test_opencode_reads_committed_wal(self):
+        # 桌面端运行时 DB 常驻 WAL；只读采集器必须能看到尚未 checkpoint 的提交。
+        conn = self.create_opencode_db(wal=True)
+        messages, parts = oc_session(
+            self.now, outs=(500,), start=self.now - 20,
+            provider="openai", model="gpt-5.1-codex")
+        self.write_opencode("wal-project", messages, parts, conn=conn)
+        try:
+            self.assertTrue(os.path.exists(self.opencode_db + "-wal"))
+            out = self.run_main()
+        finally:
+            conn.close()
+        self.assertIn("wal-project·gpt5.1codex", out)
 
     def test_full_fit_renders_speed_and_ttft(self):
         self.write("-Users-x-proj-alpha", make_session(self.now, tps=70, ttft=4))
@@ -687,12 +935,49 @@ class TestCollectMain(unittest.TestCase):
         self.assertIn("tok/s", out)
         self.assertIn("首字", out)
 
+    def test_opencode_session_rendered(self):
+        messages, parts = oc_session(self.now, tps=70, ttft=5)
+        self.write_opencode("oc-project", messages, parts)
+        out = self.run_main()
+        self.assertIn("oc-project·sonnet4.5", out)
+        self.assertIn("🟢", out)
+        self.assertIn("tok/s", out)
+        self.assertIn("首字", out)
+
     def test_codex_and_claude_merged(self):
         self.write("-Users-x-proj-claude", make_session(self.now))
         self.write_codex("rollout-y.jsonl", cx_session(self.now, start=self.now - 500))
         out = self.run_main()
         self.assertIn("proj-claude·fable5", out)
         self.assertIn("myproj·gpt5.6sol", out)
+
+    def test_opencode_and_claude_merged(self):
+        self.write("-Users-x-proj-claude", make_session(self.now))
+        messages, parts = oc_session(self.now, start=self.now - 500)
+        self.write_opencode("oc-merge", messages, parts)
+        out = self.run_main()
+        self.assertIn("proj-claude·fable5", out)
+        self.assertIn("oc-merge·sonnet4.5", out)
+
+    def test_opencode_child_session_is_background_agent(self):
+        conn = self.create_opencode_db()
+        root_messages, root_parts = oc_session(
+            self.now, start=self.now - 600)
+        self.write_opencode("oc-parent", root_messages, root_parts,
+                            sid="ses_parent", conn=conn)
+        child_messages, child_parts = oc_session(
+            self.now, outs=(600,), start=self.now - 30)
+        for m in child_messages:
+            m["id"] = "child_" + m["id"]
+        for p in child_parts:
+            p["message_id"] = "child_" + p["message_id"]
+        self.write_opencode("oc-child", child_messages, child_parts,
+                            sid="ses_child", parent="ses_parent", conn=conn)
+        conn.close()
+        out = self.run_main()
+        self.assertIn("oc-parent·sonnet4.5", out)
+        self.assertIn("🤖1·Σ5tok/s", out)  # 600 token / 120s burn window
+        self.assertNotIn("oc-child·", out)  # child 不独占下拉名额
 
     def test_zombie_session_excluded(self):
         # 文件 mtime 很新(被后台进程碰过),但最后响应在窗口外 → 不入榜
@@ -708,12 +993,29 @@ class TestCollectMain(unittest.TestCase):
         out = self.run_main()
         self.assertIn("近2小时无响应", out)
 
+    def test_opencode_zombie_excluded(self):
+        # session.time_updated 很新，但完成响应已在窗口外，不能成为僵尸行。
+        messages, parts = oc_session(
+            self.now, start=self.now - 3 * 3600, gap=30)
+        self.write_opencode("oc-zombie", messages, parts,
+                            updated=self.now - 60)
+        out = self.run_main()
+        self.assertIn("近2小时无响应", out)
+
     def test_codex_waiting_row(self):
         recs = cx_session(self.now, outs=(300,), start=self.now - 200)
         recs.append(cx(self.now - 10, "event_msg", "user_message"))
         self.write_codex("rollout-w.jsonl", recs, mtime=self.now - 10)
         out = self.run_main()
         self.assertIn("⏳等10秒", out)  # 有历史响应:速度段照常,等待作附加段
+
+    def test_opencode_waiting_row(self):
+        messages, parts = oc_session(
+            self.now, outs=(300,), start=self.now - 200)
+        messages.append(oc_message("pending", (self.now - 10) * 1000))
+        self.write_opencode("oc-wait", messages, parts)
+        out = self.run_main()
+        self.assertIn("⏳等10秒", out)
 
     def test_kimi_session_rendered(self):
         # session_index 缺失 → 标签回退自 workDirKey(wd_<slug>_<hash12>)

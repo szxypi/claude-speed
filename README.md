@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/JuDaXia/claude-speed/actions/workflows/ci.yml/badge.svg)
 
-**See Claude Code's real generation speed.** A macOS menu bar app + terminal statusline that separates the *true* tokens-per-second of your Claude Code responses from first-token latency — the number that actually fluctuates.
+**See your coding agents' real generation speed.** A macOS menu bar app + Claude Code terminal statusline that separates the *true* tokens-per-second of each response from first-token latency — the number that actually fluctuates.
 
 [中文文档 →](README.zh.md)
 
@@ -32,11 +32,11 @@ claude-speed fits `duration ≈ TTFT + tokens / TPS` across your recent response
 
 | File | What it does |
 |---|---|
-| `collect.py` | Core collector: scans active session transcripts under `~/.claude/projects/`, `~/.codex/sessions/` and `~/.kimi-code/sessions/`, prints menu bar title + dropdown lines |
+| `collect.py` | Core collector: scans active Claude Code, Codex CLI, Kimi Code and OpenCode sessions, then prints menu bar title + dropdown lines |
 | `main.swift` → `ClaudeSpeed` | Menu bar app (zero dependencies, compiled directly with `swiftc`), refreshes every 3s |
 | `statusline-speed.py` | [Claude Code statusline](https://docs.anthropic.com/en/docs/claude-code/statusline) script — same math, rendered as one ANSI line under your prompt |
 
-Works with every Claude Code client (CLI, desktop app, VS Code extension) — they all write the same transcripts. The menu bar also merges **Codex CLI** and **Kimi Code** sessions (see *How it works*). Reads local files only; no network access, nothing leaves your machine.
+Works with every Claude Code client (CLI, desktop app, VS Code extension) — they all write the same transcripts. The menu bar merges four sources: **Claude Code, Codex CLI, Kimi Code and OpenCode Desktop/CLI** (see *How it works*). OpenCode has no statusline wiring; `--statusline` remains Claude Code-only. All sources are read locally; no network access, nothing leaves your machine.
 
 ## Install
 
@@ -50,10 +50,11 @@ git clone https://github.com/JuDaXia/claude-speed && cd claude-speed
 
 Requires Xcode Command Line Tools (`xcode-select --install`) and python3.
 
-**What to expect right after install:** a **⚪ icon appears in the menu bar** (idle — no active session yet). Ask Claude Code anything and within a few seconds it becomes a live reading like `🟢71`; with `--statusline`, the speed line appears under the Claude Code input box on its next refresh — no restart needed. If nothing shows up, run `./collect.py`: it prints exactly what the menu bar would display.
+**What to expect right after install:** a **⚪ icon appears in the menu bar** (idle — no active session yet). Ask Claude Code or OpenCode Desktop anything and within a few seconds it becomes a live reading like `🟢71`; with `--statusline`, the speed line appears under the Claude Code input box on its next refresh — no restart needed. If nothing shows up, run `./collect.py`: it prints exactly what the menu bar would display.
 
 Notes:
 - The LaunchAgent points into the cloned directory — clone it anywhere, but if you later **move the directory, re-run `install.sh`**.
+- If OpenCode uses a custom `XDG_DATA_HOME` or `OPENCODE_DB`, `install.sh` copies the current value into the LaunchAgent; re-run it after changing either variable.
 - `--statusline` backs up `~/.claude/settings.json` to `.bak` before editing.
 - **Update:** `git pull && ./install.sh` (idempotent — recompiles and restarts).
 
@@ -81,7 +82,7 @@ Menu bar title — `[⚠️][lamp+speed][ 🤖N]`, e.g. `⚠️🟢71 🤖3`:
 
 The title stays minimal by design — waiting indicators live in the dropdown only: `⏳等N秒` counts up while a request is pending (disappears after 120s, assumed interrupted), and sessions with no response yet show `等待首个响应`.
 
-Dropdown, one line per active session (up to 4, last 2 hours, **Claude Code, Codex CLI and Kimi Code merged**):
+Dropdown, one line per active session (up to 4, last 2 hours, **Claude Code, Codex CLI, Kimi Code and OpenCode merged**):
 
 ```
 myproject·fable5  🟢 71 tok/s 首字4s  缓存12%冷  ⚠️1错  最近1022tok·22s  4秒前
@@ -103,6 +104,7 @@ Statusline colors: speed green ≥50 / yellow ≥30 / red <30 · TTFT green ≤5
 - **Background subagent monitoring**: research/Task agents write to `<session>/subagents/agent-*.jsonl` while the main transcript stays silent — a session's activity time is therefore `max(main transcript, newest subagent)`, so background work is never mistaken for idle. Agents with writes in the last 90s count as active; their combined output over the last 2 minutes gives the fleet burn rate (`🤖N Σtok/s`), and their response samples join the cross-session pool for two-stage fitting.
 - **Codex CLI support** (menu bar only): Codex sessions live in `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`. Each API response streams content records and is closed by a `token_count` event carrying full usage. Group start = timestamp of the record preceding the first content record (includes TTFT, same semantics as Claude); group end = the **last content record**, not the `token_count` event — that fires after tool execution and would inflate generation time. Model comes from `turn_context`, project label from `session_meta.cwd`, cache hit from `cached_input_tokens/input_tokens`. Everything downstream (fitting, windows, display) is reused as-is. Sessions with stale content are excluded even if the file was recently touched.
 - **Kimi Code support** (menu bar only — Kimi Code has no statusline hook): sessions live in `~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/main/wire.jsonl` (root relocatable via `KIMI_CODE_HOME`). One API response = an `llm.request` record paired with its closing `step.end` event, which carries full usage. Group start = the `llm.request` time (it *is* the request send time); group end = the `step.end` time; wire `time` fields are epoch-millisecond strings. A retry (new `llm.request` before any `step.end`) re-anchors to the retry, mirroring Claude's error-anchor rule. Usage maps 1:1 (`inputOther`/`inputCacheRead`/`inputCacheCreation`); model comes from `llm.request.model`; project label from `session_index.jsonl`'s `workDir`, falling back to the `workDirKey` slug. Subagents at `agents/agent-*/wire.jsonl` feed the same fleet monitoring (`🤖N Σtok/s`) and slope pool. Note: `wire.jsonl` is an undocumented internal format — the parser skips anything it doesn't recognize, and a future format change degrades display rather than crashing.
+- **OpenCode Desktop support** (menu bar only — no statusline wiring): in OpenCode v1.18.15, Desktop and CLI share the XDG data database at `$XDG_DATA_HOME/opencode/opencode.db` (`~/.local/share/opencode/opencode.db` by default on macOS). claude-speed reads the SQLite database and its WAL without writing to either. Each completed assistant message is one response and `out = tokens.output + tokens.reasoning`. The generation boundary is the latest text/reasoning end or tool start (falling back to `time.completed` for an older shape); duration runs from `time.created` to that boundary, minus the **union** of earlier tool-state intervals. This excludes local `bash`/`task`/`question` execution without double-deducting overlapping tools. Input/cache usage maps from `tokens.input`, `tokens.cache.read` and `tokens.cache.write`; `providerID/modelID` is the model key; `session.directory` supplies the project label. Sessions with a `parent_id` are treated as background agents and feed fleet monitoring and the cross-session slope pool. The database and schema are undocumented internal implementation details: an unrecognized schema is skipped silently, degrading the display instead of crashing the collector.
 
 ## Operations
 
@@ -125,9 +127,9 @@ Tunables are constants at the top of both Python scripts (thresholds, windows, s
 
 The displayed speed is an *estimate*, not an absolute reading, and its basis can
 drift as the algorithm evolves — so the definition is pinned. [METRIC.md](METRIC.md)
-is the versioned spec (currently v1.1): what "speed" means, the anchor rules, the
-estimator, and every parameter. `tests/fixtures/*.jsonl` are frozen transcript
-bytes (the physical standard); `tests/golden.json` is their certified reading.
+is the versioned spec (currently v1.2): what "speed" means, the anchor rules, the
+estimator, and every parameter. `tests/fixtures/*.jsonl` are frozen source
+records (the physical standard); `tests/golden.json` is their certified reading.
 Every CI run asserts the estimator still reproduces those readings (**drift** — a
 code change that moves the number turns the suite red) *and* still recovers each
 synthetic fixture's known ground truth (**calibration** — guards against a biased
@@ -140,11 +142,13 @@ the `golden.json` diff, bump the version, and document the shift.
 python3 -m unittest discover -s tests -v
 ```
 
-74 tests cover the fitting math (known-truth recovery, outlier rejection, window
-expansion), end-to-end menu bar scenarios (waiting, errors, cold cache, two-stage
-fit, background subagents and fleet burn proration), and a source-level AST check
-enforcing that the shared algorithm stays byte-identical between `collect.py` and
-`statusline-speed.py`. CI runs them on macOS and Linux plus a `swiftc` smoke build.
+Tests cover the fitting math (known-truth recovery, outlier rejection, window
+expansion), source adapters (including OpenCode SQLite/WAL parsing and tool-time
+subtraction), end-to-end menu bar scenarios (waiting, errors, cold cache,
+two-stage fit, background subagents and fleet burn proration), and a source-level
+AST check enforcing that the shared algorithm stays byte-identical between
+`collect.py` and `statusline-speed.py`. CI runs them on macOS and Linux plus a
+`swiftc` smoke build.
 
 ## License
 
