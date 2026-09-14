@@ -52,13 +52,13 @@ if (Test-Path $Settings) {
     } else { Step 'statusLine 未指向本目录,不动 settings.json' }
 }
 
-# 4. 环境变量(仅当引用本目录)
+# 4. 环境变量(仅当引用本目录,或是指向任一 claude-speed 副本的 collect.py --json,如 WSL 远端)
 $rem = [Environment]::GetEnvironmentVariable('CLAUDE_SPEED_REMOTES', 'User')
-if ($rem -and $rem.IndexOf($Dir, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+if ($rem -and ($rem.IndexOf($Dir, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or $rem -match 'claude-speed[/\\]collect\.py')) {
     Step "删除用户环境变量 CLAUDE_SPEED_REMOTES ($rem)"
     if (-not $DryRun) { [Environment]::SetEnvironmentVariable('CLAUDE_SPEED_REMOTES', $null, 'User') }
 } elseif ($rem) {
-    Step "CLAUDE_SPEED_REMOTES 未引用本目录($rem),保留"
+    Step "CLAUDE_SPEED_REMOTES 未引用 claude-speed($rem),保留"
 }
 
 Write-Host 'Done.'
