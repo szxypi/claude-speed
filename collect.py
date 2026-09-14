@@ -12,10 +12,21 @@
 import glob
 import json
 import os
+import re
 import sqlite3
+import subprocess
+import sys
 import time
 from datetime import datetime
 from urllib.parse import quote
+
+# Windows 控制台默认 GBK/cp1252 编码,输出 emoji/中文会 UnicodeEncodeError;
+# 托盘与 statusline 宿主都按 UTF-8 读,这里强制 stdout 为 UTF-8(其余平台无影响)。
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (ValueError, OSError):
+        pass
 
 ROOT = os.path.expanduser("~/.claude/projects")
 SCAN_WINDOW = 2 * 3600  # 下拉列出近 2 小时内有写入的会话
@@ -38,6 +49,17 @@ OPENCODE_DB = (
     else _OPENCODE_DB_ENV if _OPENCODE_DB_ENV and os.path.isabs(_OPENCODE_DB_ENV)
     else os.path.join(OPENCODE_DATA, _OPENCODE_DB_ENV or "opencode.db")
 )
+# 多机合并:本机行的主机标签(空=不标)。WSL 里默认 "wsl",便于 Windows 托盘
+# 合并展示时区分来源;远端行的标签总是加 "host:" 前缀。
+HOST_TAG = os.environ.get("CLAUDE_SPEED_HOST",
+                          "wsl" if os.environ.get("WSL_DISTRO_NAME") else "")
+# 远端采集命令(分号或换行分隔),每条须输出 `collect.py --json` 的 JSON;
+# 典型:Windows 托盘用 "wsl.exe -e python3 /home/u/claude-speed/collect.py --json"
+# 把 WSL 里的会话并进来(\\wsl$ 的 9P 直读在部分内核上不可用且慢)。
+REMOTES = [c.strip() for c in
+           re.split(r"[;\n]", os.environ.get("CLAUDE_SPEED_REMOTES", ""))
+           if c.strip()]
+REMOTE_TIMEOUT = 8   # 远端采集超时(秒);超时/失败该远端静默为空
 OPENCODE_MAX_MESSAGES = 200  # 每个近期会话只读最新 N 条 message metadata
 OPENCODE_MAX_SESSIONS = 64   # 含 parent/child；防异常库拖慢 3s 刷新
 
@@ -527,7 +549,7 @@ def kimi_session_labels():
     labels = {}
     try:
         with open(os.path.join(os.path.dirname(KIMI_ROOT),
-                               "session_index.jsonl")) as f:
+                               "session_index.jsonl"), encoding="utf-8") as f:
             for line in f:
                 try:
                     r = json.loads(line)
@@ -912,8 +934,8 @@ def lamp(tps):
     return "🟢" if tps >= 50 else ("🟡" if tps >= 30 else "🔴")
 
 
-def main():
-    now = time.time()
+def collect_rows(now):
+    """扫描全部本机数据源 → 已拟合的会话行列表(按最近响应时间倒序,未截断)。"""
 
     # ---- 扫描:每会话解析一次尾部,同时汇集跨会话共享斜率的点池 ----
     sessions = []
@@ -1036,6 +1058,71 @@ def main():
                      "model": model_tag(g.get("model")), "last": g,
                      "agents": s["agents"]})
     rows.sort(key=lambda r: r["end"], reverse=True)
+    return rows
+
+
+def rows_to_json(rows, now):
+    """行 → 可跨进程传输的 JSON 文本(供 --json / 远端合并)。"""
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["fit"] = list(r["fit"]) if r["fit"] is not None else None
+        d["agents"] = list(r["agents"])
+        out.append(d)
+    return json.dumps({"host": HOST_TAG, "now": now, "rows": out},
+                      ensure_ascii=False)
+
+
+def rows_from_json(text, now):
+    """远端 JSON → 行列表;标签加 host 前缀,时间按两端 now 之差对齐。
+    格式不对/字段缺失 → 空列表(远端降级,不影响本机)。"""
+    try:
+        doc = json.loads(text)
+        rows = doc["rows"]
+        shift = now - float(doc.get("now") or now)
+        host = str(doc.get("host") or "remote")
+    except (ValueError, KeyError, TypeError):
+        return []
+    out = []
+    for r in rows:
+        try:
+            d = dict(r)
+            d["fit"] = tuple(r["fit"]) if r.get("fit") is not None else None
+            d["agents"] = tuple(r.get("agents") or (0, 0.0))
+            d["end"] = float(r["end"]) + shift
+            d["mtime"] = float(r.get("mtime") or r["end"]) + shift
+            d["err_ts"] = [float(e) + shift for e in (r.get("err_ts") or [])]
+            d["label"] = "%s:%s" % (host, r.get("label") or "")
+            if d.get("last") is not None:
+                d["last"] = dict(d["last"])
+            d.setdefault("wait", None)
+            d.setdefault("win", None)
+            d.setdefault("glob", False)
+            d.setdefault("model", "")
+            out.append(d)
+        except (ValueError, KeyError, TypeError):
+            continue
+    return out
+
+
+def remote_rows(now, commands=None):
+    """跑每条远端采集命令,合并其 JSON 行。任何失败/超时该远端静默为空。"""
+    rows = []
+    for cmd in (REMOTES if commands is None else commands):
+        try:
+            p = subprocess.run(cmd, shell=True, capture_output=True,
+                               timeout=REMOTE_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if p.returncode != 0:
+            continue
+        rows.extend(rows_from_json(p.stdout.decode("utf-8", "replace"), now))
+    return rows
+
+
+def render(rows, now):
+    """行 → 菜单栏协议文本:第 1 行标题,其余下拉明细。"""
+    rows = sorted(rows, key=lambda r: r["end"], reverse=True)[:MAX_SESSIONS]
 
     # ---- 标题:⚠️(近期错误)+ 速度灯 + 🤖(后台舰队) ----
     # 等待/高首字的 ⏳ 只进下拉,不占图标栏(用户偏好:标题保持最简)
@@ -1108,6 +1195,19 @@ def main():
         print("%s  %s" % (head, "  ".join(segs)))
     if not rows:
         print("近2小时无响应")
+
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    now = time.time()
+    rows = collect_rows(now)
+    if "--json" in argv:
+        print(rows_to_json(rows, now))
+        return
+    if "--no-remote" not in argv:
+        rows.extend(remote_rows(now))
+    render(rows, now)
 
 
 if __name__ == "__main__":

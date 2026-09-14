@@ -40,17 +40,17 @@ class TestGolden(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cs = load_cs()
-        with open(os.path.join(HERE, "golden.json")) as f:
+        with open(os.path.join(HERE, "golden.json"), encoding="utf-8") as f:
             cls.doc = json.load(f)
 
     def measure(self, name, source):
-        with open(os.path.join(HERE, "fixtures", name + ".jsonl")) as f:
+        with open(os.path.join(HERE, "fixtures", name + ".jsonl"), encoding="utf-8") as f:
             lines = f.read().splitlines()
         groups = self.PARSERS[source](self.cs, lines)
         return groups, self.cs.fit_speed(self.cs.current_model_groups(groups))
 
     def test_version_matches_metric_md(self):
-        with open(os.path.join(REPO, "METRIC.md")) as f:
+        with open(os.path.join(REPO, "METRIC.md"), encoding="utf-8") as f:
             head = f.read(400)
         self.assertIn("v%s" % self.doc["metric_version"], head,
                       "METRIC.md 顶部的版本号必须与 golden.json 一致")

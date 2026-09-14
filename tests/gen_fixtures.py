@@ -293,7 +293,7 @@ def build():
 def main():
     os.makedirs(FIX, exist_ok=True)
     for name, recs in build().items():
-        with open(os.path.join(FIX, name + ".jsonl"), "w") as f:
+        with open(os.path.join(FIX, name + ".jsonl"), "w", encoding="utf-8") as f:
             for r in recs:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         print("wrote", name + ".jsonl", "(%d records)" % len(recs))

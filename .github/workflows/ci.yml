@@ -26,3 +26,24 @@ jobs:
         run: python3 -m py_compile collect.py statusline-speed.py
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
+
+  # Windows: statusline + collector + tray script syntax (no GUI in CI)
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Python
+        run: python -m py_compile collect.py statusline-speed.py
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          foreach ($f in 'ClaudeSpeed.ps1','install.ps1','uninstall.ps1') {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errs) | Out-Null
+            if ($errs) { $errs | ForEach-Object { Write-Error $_.Message }; exit 1 }
+            "OK $f"
+          }
+      - name: Collector runs on an empty profile
+        run: python collect.py --no-remote

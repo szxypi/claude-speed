@@ -193,11 +193,11 @@ class SharedAlgoMixin:
         subdir = os.path.join(root, "abc", "subagents")
         os.makedirs(subdir)
         ap = os.path.join(subdir, "agent-x1.jsonl")
-        open(ap, "w").close()
+        open(ap, "w", encoding="utf-8").close()
         wfdir = os.path.join(subdir, "workflows", "wf_123")
         os.makedirs(wfdir)
         wp = os.path.join(wfdir, "agent-y2.jsonl")
-        open(wp, "w").close()
+        open(wp, "w", encoding="utf-8").close()
         self.assertEqual(self.m.subagent_paths(main_p), [ap, wp])  # 两种布局都要
         self.assertEqual(self.m.subagent_paths(None), [])
 
@@ -208,7 +208,7 @@ class SharedAlgoMixin:
         def agent(name, out, mtime):
             p = os.path.join(root, name)
             recs = [rec_u(now - 30), rec_a("a", now - 10, out)]
-            with open(p, "w") as f:
+            with open(p, "w", encoding="utf-8") as f:
                 for r in recs:
                     f.write(json.dumps(r) + "\n")
             os.utime(p, (mtime, mtime))
@@ -228,7 +228,7 @@ class SharedAlgoMixin:
         root = tempfile.mkdtemp()
         p = os.path.join(root, "agent-long.jsonl")
         recs = [rec_u(now - 250), rec_a("a", now - 10, 600)]  # dur=240,0.4s/tok
-        with open(p, "w") as f:
+        with open(p, "w", encoding="utf-8") as f:
             for r in recs:
                 f.write(json.dumps(r) + "\n")
         os.utime(p, (now - 5, now - 5))
@@ -651,7 +651,7 @@ class TestCollectMain(unittest.TestCase):
         d = os.path.join(self.root, dirname)
         os.makedirs(d, exist_ok=True)
         p = os.path.join(d, "s.jsonl")
-        with open(p, "w") as f:
+        with open(p, "w", encoding="utf-8") as f:
             for r in recs:
                 f.write(json.dumps(r) + "\n")
         if mtime:
@@ -662,7 +662,7 @@ class TestCollectMain(unittest.TestCase):
         p = os.path.join(self.kimi_root, wdkey, "session_x", "agents", "main")
         os.makedirs(p, exist_ok=True)
         wp = os.path.join(p, "wire.jsonl")
-        with open(wp, "w") as f:
+        with open(wp, "w", encoding="utf-8") as f:
             for r in recs:
                 f.write(json.dumps(r) + "\n")
         if mtime:
@@ -870,7 +870,7 @@ class TestCollectMain(unittest.TestCase):
         for i in range(n):
             p = os.path.join(subdir, "agent-%d.jsonl" % i)
             recs = [rec_u(self.now - 30), rec_a("a%d" % i, self.now - 10, out)]
-            with open(p, "w") as f:
+            with open(p, "w", encoding="utf-8") as f:
                 for r in recs:
                     f.write(json.dumps(r) + "\n")
             mt = mtime if mtime else self.now - 5
@@ -921,7 +921,7 @@ class TestCollectMain(unittest.TestCase):
         d = os.path.join(self.codex_root, "2026", "07", "22")
         os.makedirs(d, exist_ok=True)
         p = os.path.join(d, fname)
-        with open(p, "w") as f:
+        with open(p, "w", encoding="utf-8") as f:
             for r in recs:
                 f.write(json.dumps(r) + "\n")
         if mtime:
@@ -1044,7 +1044,7 @@ class TestCollectMain(unittest.TestCase):
     def test_agent_transcripts_ignored(self):
         d = os.path.join(self.root, "-Users-x-proj-sub")
         os.makedirs(d)
-        with open(os.path.join(d, "agent-abc123.jsonl"), "w") as f:
+        with open(os.path.join(d, "agent-abc123.jsonl"), "w", encoding="utf-8") as f:
             for r in make_session(self.now):
                 f.write(json.dumps(r) + "\n")
         out = self.run_main()
@@ -1052,6 +1052,80 @@ class TestCollectMain(unittest.TestCase):
 
 
 # ---------- statusline 端到端 ----------
+
+class TestCollectRemoteMerge(TestCollectMain):
+    """--json 往返与远端合并(CLAUDE_SPEED_REMOTES):Windows 托盘用它把 WSL 会话并进来。"""
+
+    def json_rows(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cs.main(["--json"])
+        return buf.getvalue()
+
+    def test_json_roundtrip_preserves_fit(self):
+        self.write("proj-alpha", make_session(self.now, tps=70, ttft=4))
+        text = self.json_rows()
+        doc = json.loads(text)
+        self.assertEqual(doc["host"], cs.HOST_TAG)
+        self.assertEqual(len(doc["rows"]), 1)
+        rows = cs.rows_from_json(text, self.now + 5)
+        self.assertEqual(rows[0]["label"], "%s:proj-alpha" % (cs.HOST_TAG or "remote"))
+        self.assertAlmostEqual(rows[0]["fit"][0], 70, delta=3)
+        self.assertIsInstance(rows[0]["fit"], tuple)
+        self.assertIsInstance(rows[0]["agents"], tuple)
+        # 两端 now 差 5s → end 平移 5s,"N秒前" 才不会被远端时钟拉偏
+        self.assertAlmostEqual(rows[0]["end"] - doc["rows"][0]["end"], 5, delta=0.01)
+
+    def test_remote_rows_merge_into_render(self):
+        self.write("proj-local", make_session(self.now - 600, tps=40, ttft=5))
+        remote = cs.rows_to_json(
+            [{"end": self.now - 1, "mtime": self.now - 1, "fit": (80.0, 3.0),
+              "glob": False, "win": None, "wait": None, "err_ts": [],
+              "label": "remote-proj", "model": "fable5", "agents": (0, 0.0),
+              "last": {"out": 500, "start": self.now - 10, "end": self.now - 1,
+                       "inp": 10, "cr": 90, "cc": 0}}], self.now)
+        cmd = "%s -c \"import sys;sys.stdout.write(open(sys.argv[1],encoding='utf-8').read())\" %s"
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                         encoding="utf-8") as f:
+            f.write(remote.replace('"host": "%s"' % cs.HOST_TAG, '"host": "win"'))
+            path = f.name
+        try:
+            old = cs.REMOTES
+            cs.REMOTES = [cmd % (sys.executable, path)]
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cs.main([])
+        finally:
+            cs.REMOTES = old
+            os.unlink(path)
+        out = buf.getvalue().splitlines()
+        self.assertTrue(out[0].startswith("🟢80"), out[0])  # 远端更新,占标题
+        self.assertIn("win:remote-proj", out[1])
+        self.assertIn("local", "\n".join(out[2:]))
+
+    def test_remote_failures_degrade_silently(self):
+        self.write("proj-local", make_session(self.now, tps=70, ttft=4))
+        rows = cs.remote_rows(self.now, [
+            "%s -c \"import sys;sys.exit(3)\"" % sys.executable,     # 非零退出
+            "%s -c \"print('not json')\"" % sys.executable,         # 坏输出
+            "definitely-not-a-command-xyz",                          # 不存在
+        ])
+        self.assertEqual(rows, [])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cs.main(["--no-remote"])
+        self.assertIn("tok/s", buf.getvalue())
+
+    def test_json_mode_skips_remotes(self):
+        # --json 是被远端调用的一侧,绝不能再去跑自己的 REMOTES(否则互相递归)
+        old = cs.REMOTES
+        cs.REMOTES = ["%s -c \"import sys;sys.exit(9)\"" % sys.executable]
+        try:
+            doc = json.loads(self.json_rows())
+        finally:
+            cs.REMOTES = old
+        self.assertEqual(doc["rows"], [])
+
 
 class TestStatuslineMain(unittest.TestCase):
     def _run(self, stdin_obj):
@@ -1084,18 +1158,46 @@ class TestStatuslineMain(unittest.TestCase):
         root = tempfile.mkdtemp()
         now = time.time()
         path = os.path.join(root, "sess.jsonl")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             for r in make_session(now):
                 f.write(json.dumps(r) + "\n")
         subdir = os.path.join(root, "sess", "subagents")
         os.makedirs(subdir)
         ap = os.path.join(subdir, "agent-1.jsonl")
-        with open(ap, "w") as f:
+        with open(ap, "w", encoding="utf-8") as f:
             f.write(json.dumps(rec_u(now - 30)) + "\n")
             f.write(json.dumps(rec_a("a", now - 10, 600)) + "\n")
         out = self._run({"transcript_path": path})
         self.assertIn("🤖1", out)
         self.assertIn("Σ5tok/s", out)  # 600tok/120s
+
+    def _run_segment(self, stdin_obj):
+        buf = io.StringIO()
+        old = sys.stdin
+        sys.stdin = io.StringIO(json.dumps(stdin_obj))
+        try:
+            with contextlib.redirect_stdout(buf):
+                sl.main(["--segment"])
+        finally:
+            sys.stdin = old
+        return buf.getvalue()
+
+    def test_segment_mode_only_speed_parts(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            for r in make_session(time.time(), tps=70, ttft=4):
+                f.write(json.dumps(r) + "\n")
+            path = f.name
+        out = self._run_segment({"model": {"display_name": "TestModel"},
+                                 "transcript_path": path,
+                                 "context_window": {"used_percentage": 42}})
+        os.unlink(path)
+        self.assertIn("tok/s", out)
+        self.assertNotIn("TestModel", out)  # 宿主状态栏已有模型名/ctx,不重复
+        self.assertNotIn("ctx", out)
+
+    def test_segment_mode_silent_without_data(self):
+        self.assertEqual(self._run_segment({}), "")
+        self.assertEqual(self._run_segment({"transcript_path": "/nonexistent"}), "")
 
     def test_bad_stdin_degrades_gracefully(self):
         out = self._run(None)

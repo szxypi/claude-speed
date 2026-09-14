@@ -79,7 +79,7 @@ def load_cs():
 
 def measure(cs, name, source):
     """读冻结夹具 → 解析 → 当前模型组 → fit_speed。返回 (groups数, reading)。"""
-    lines = open(os.path.join(FIX, name + ".jsonl")).read().splitlines()
+    lines = open(os.path.join(FIX, name + ".jsonl"), encoding="utf-8").read().splitlines()
     groups = PARSERS[source](cs, lines)
     fit = cs.fit_speed(cs.current_model_groups(groups))
     if fit is None:
@@ -107,7 +107,7 @@ def main():
         "drift_tol": DRIFT_TOL, "calib_tol": CALIB_TOL,
         "fixtures": fixtures,
     }
-    with open(os.path.join(HERE, "golden.json"), "w") as f:
+    with open(os.path.join(HERE, "golden.json"), "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2)
         f.write("\n")
     print("wrote golden.json (%d fixtures, metric v%s)" % (len(fixtures), METRIC_VERSION))

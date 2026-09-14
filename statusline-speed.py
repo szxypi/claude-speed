@@ -14,6 +14,14 @@ import sys
 import time
 from datetime import datetime
 
+# Windows 控制台默认 GBK/cp1252 编码,输出 emoji/中文会 UnicodeEncodeError;
+# 托盘与 statusline 宿主都按 UTF-8 读,这里强制 stdout 为 UTF-8(其余平台无影响)。
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (ValueError, OSError):
+        pass
+
 TAIL_BYTES = 400_000  # transcript 可达几十 MB,只读尾部足够覆盖最近若干条响应
 
 # 速度拆分参数(见 fit_speed,与 collect.py 完全一致)
@@ -236,18 +244,11 @@ def fmt_dur(ms):
     return "%dm%02ds" % (s // 60, s % 60) if s >= 60 else "%ds" % s
 
 
-def main():
-    try:
-        info = json.load(sys.stdin)
-    except ValueError:
-        info = {}
+def speed_parts(info, now):
+    """速度相关片段(不含模型名/ctx/API 时长),供 --segment 嵌入既有状态栏。
+
+    返回 ANSI 片段列表;无任何响应数据时返回 []。"""
     parts = []
-    now = time.time()
-
-    model = ((info.get("model") or {}).get("display_name") or "").strip()
-    if model:
-        parts.append("\033[1m%s\033[0m" % model)
-
     groups, err_ts = response_groups(tail_lines(info.get("transcript_path")))
     fit, win = windowed_fit(current_model_groups(groups), now)
     if fit is None:
@@ -286,7 +287,33 @@ def main():
     nerr = sum(1 for e in err_ts if now - e <= ERR_ROW_WINDOW)
     if nerr:
         parts.append("\033[31m⚠️%d错\033[0m" % nerr)
+    return parts
 
+
+# 片段分隔符;嵌入宿主状态栏时可用 CLAUDE_SPEED_SEP 对齐宿主风格(如 " │ ")
+SEP = os.environ.get("CLAUDE_SPEED_SEP") or " \033[2m|\033[0m "
+
+
+def main(argv=None):
+    """默认:完整状态栏(模型 | 速度… | API 时长 | ctx)。
+    --segment:只输出速度片段,供既有状态栏脚本拼接;无数据时不输出任何字符。"""
+    argv = sys.argv[1:] if argv is None else argv
+    try:
+        info = json.load(sys.stdin)
+    except ValueError:
+        info = {}
+    now = time.time()
+    if "--segment" in argv:
+        parts = speed_parts(info, now)
+        if parts:
+            print(SEP.join(parts))
+        return
+
+    parts = []
+    model = ((info.get("model") or {}).get("display_name") or "").strip()
+    if model:
+        parts.append("\033[1m%s\033[0m" % model)
+    parts.extend(speed_parts(info, now))
     api_ms = (info.get("cost") or {}).get("total_api_duration_ms")
     if api_ms:
         parts.append("API %s" % fmt_dur(api_ms))
@@ -295,11 +322,13 @@ def main():
         cc = "31" if pct >= 85 else ("33" if pct >= 60 else "0")
         parts.append("\033[%smctx %.0f%%\033[0m" % (cc, pct))
 
-    print(" \033[2m|\033[0m ".join(parts) if parts else "⚡ 暂无速度数据")
+    print(SEP.join(parts) if parts else "⚡ 暂无速度数据")
 
 
 if __name__ == "__main__":
     try:
         main()
     except Exception:
-        print("⚡ n/a")
+        # --segment 嵌入模式下宁可空白,别往宿主状态栏塞错误文本
+        if "--segment" not in sys.argv[1:]:
+            print("⚡ n/a")
