@@ -1,8 +1,10 @@
 # claude-speed
 
-![CI](https://github.com/JuDaXia/claude-speed/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/szxypi/claude-speed/actions/workflows/ci.yml/badge.svg)
 
-**看见编码代理的真实生成速度。** macOS 菜单栏应用 + Claude Code 终端 statusline，把每次回复的**真·生成速度（tok/s）**和**首字延迟（TTFT）**拆开显示——后者才是真正在波动的东西。
+> 基于 [JuDaXia/claude-speed](https://github.com/JuDaXia/claude-speed) 的分支，新增 **Windows 托盘应用**、**WSL 支持**（Windows 托盘可合并 WSL 里的会话）与既有状态栏脚本的**嵌入模式**。测速算法与 METRIC 标准未改动。
+
+**看见编码代理的真实生成速度。** macOS 菜单栏应用 / Windows 托盘应用 + Claude Code 终端 statusline，把每次回复的**真·生成速度（tok/s）**和**首字延迟（TTFT）**拆开显示——后者才是真正在波动的东西。
 
 [English docs →](README.md)
 
@@ -33,7 +35,8 @@ claude-speed 对近期响应拟合 `耗时 ≈ TTFT + token数/TPS`（Theil-Sen 
 | 文件 | 作用 |
 |---|---|
 | `collect.py` | 采集核心：扫描 Claude Code、Codex CLI、Kimi Code 与 OpenCode 的活跃会话，输出「首行=菜单栏标题，其余行=下拉明细」 |
-| `main.swift` → `ClaudeSpeed` | 菜单栏应用（零第三方依赖，`swiftc` 直编），每 3s 刷新 |
+| `main.swift` → `ClaudeSpeed` | macOS 菜单栏应用（零第三方依赖，`swiftc` 直编），每 3s 刷新 |
+| `ClaudeSpeed.ps1` + `install.ps1` | Windows 托盘应用（纯 PowerShell / WinForms，零依赖），同样 3s 刷新；可经 `wsl.exe` 合并 WSL 里的会话 |
 | `statusline-speed.py` | [Claude Code statusline](https://docs.anthropic.com/en/docs/claude-code/statusline) 脚本——同一套算法，渲染成输入框下方一行 ANSI 彩色文本 |
 
 覆盖所有 Claude Code 客户端（CLI、桌面 App、VS Code 插件都写同一份 transcript）；菜单栏合并 **Claude Code、Codex CLI、Kimi Code 与 OpenCode Desktop/CLI** 四类会话（见「测速算法」）。OpenCode 没有 statusline 接线，`--statusline` 仍只服务 Claude Code。所有数据都在本地只读，无任何网络请求。
@@ -58,13 +61,50 @@ git clone https://github.com/JuDaXia/claude-speed && cd claude-speed
 - `--statusline` 修改 `~/.claude/settings.json` 前会自动备份成 `.bak`；
 - **更新**：`git pull && ./install.sh`（幂等——重编译并重启）。
 
+**Windows（托盘应用）：** 在 PowerShell（5.1 或 7）里，需要 PATH 上有 python 3：
+
+```powershell
+git clone https://github.com/szxypi/claude-speed; cd claude-speed
+.\install.ps1                 # 托盘 + 开机自启快捷方式（shell:startup）
+.\install.ps1 -Statusline     # 顺带接线 Claude Code statusline
+```
+
+托盘出现一个带 tok/s 数字的彩色圆点（`⚪` 为闲置）。悬停看摘要，点击看每会话一行。`-Python <exe>` 指定解释器，`-NoAutostart` 不建自启快捷方式，`.\uninstall.ps1` 全部卸掉。
+
+**Windows + WSL（一个托盘看两边）：** 托盘无法直接读 WSL 的 transcript（`\\wsl$` 走 9P 很慢，部分内核上直接不可用），所以让 WSL 里的副本自己采集、托盘合并结果：
+
+```powershell
+# WSL 里也 clone 一份（如 ~/projects/claude-speed），然后：
+.\install.ps1 -Remotes 'wsl.exe -e python3 /home/<你>/projects/claude-speed/collect.py --json'
+```
+
+`-Remotes` 写入用户环境变量 `CLAUDE_SPEED_REMOTES`（`;` 分隔多条命令）。每条命令须输出 `collect.py --json`；远端行显示为 `wsl:项目·模型`。远端会话的斜率池独立（不跨主机借斜率）。远端失败或超过 8 秒会被静默跳过。
+
+**WSL / Linux（只有 statusline——WSLg 没有可靠的托盘）：**
+
+```bash
+git clone https://github.com/szxypi/claude-speed ~/projects/claude-speed
+~/projects/claude-speed/install.sh --statusline   # 替换 ~/.claude/settings.json 的 statusLine（备份 .bak）
+```
+
+**嵌入到你已有的状态栏脚本**（保留自己的排版；macOS/Linux/WSL/Windows git-bash 通用）：
+
+```bash
+# 在你的 statusline 脚本里，$input 是 Claude Code 喂进来的 JSON
+case "$OSTYPE" in msys*|cygwin*) py=python ;; *) py=python3 ;; esac   # Windows 的 python3 是商店占位 stub
+seg=$(printf '%s' "$input" | CLAUDE_SPEED_SEP=" | " "$py" ~/projects/claude-speed/statusline-speed.py --segment)
+[ -n "$seg" ] && line+=" | $seg"
+```
+
+`--segment` 只输出速度片段（`⚡71 tok/s 首字4.2s | 缓存98% | 最近1022tok·22s | 🤖2 Σ40tok/s | ⚠️1错`）——不含模型名与 ctx%，**没有数据时什么都不输出**，宿主行不会出现空槽位。`CLAUDE_SPEED_SEP` 可覆盖分隔符。
+
 **只用 statusline（任何平台，含 Linux）：** 在 `~/.claude/settings.json` 加：
 
 ```json
 { "statusLine": { "type": "command", "command": "/path/to/claude-speed/statusline-speed.py", "padding": 0 } }
 ```
 
-**卸载：** `./uninstall.sh`（移除 LaunchAgent 和 statusline 接线）。
+**卸载：** macOS/Linux 用 `./uninstall.sh`（移除 LaunchAgent 和 statusline 接线），Windows 用 `.\uninstall.ps1`（托盘、自启快捷方式、statusline 接线、`CLAUDE_SPEED_REMOTES`）。
 
 ## 显示语义速查
 
@@ -118,7 +158,12 @@ swiftc -O -o ClaudeSpeed main.swift
 launchctl kickstart -k gui/$(id -u)/com.claude-speed.menubar
 
 # 手动测采集
-./collect.py
+./collect.py               # 合并视图（含 CLAUDE_SPEED_REMOTES）
+./collect.py --no-remote   # 只看本机
+./collect.py --json        # 远端交给托盘的原始行
+
+# Windows：重启托盘（install.ps1 幂等，做的就是这件事）
+.\install.ps1 -NoAutostart
 ```
 
 阈值、窗口、会话数等可调参数都是两个 Python 脚本顶部的常量。
@@ -141,7 +186,7 @@ python3 -m unittest discover -s tests -v
 测试覆盖:拟合数学(已知真值还原、离群剔除、扩窗)、数据源适配(含 OpenCode
 SQLite/WAL 解析与工具耗时扣除)、菜单栏端到端场景(等待/错误/冷缓存/两阶段拟合/
 后台子代理与燃烧率折算)、以及一个 AST 级源码比对——强制共享算法在 `collect.py`
-与 `statusline-speed.py` 间保持逐字一致。CI 在 macOS + Linux 跑测试,外加
+与 `statusline-speed.py` 间保持逐字一致。CI 在 macOS + Linux + Windows 跑测试,外加
 `swiftc` 编译冒烟。
 
 ## License

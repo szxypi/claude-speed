@@ -1,8 +1,10 @@
 # claude-speed
 
-![CI](https://github.com/JuDaXia/claude-speed/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/szxypi/claude-speed/actions/workflows/ci.yml/badge.svg)
 
-**See your coding agents' real generation speed.** A macOS menu bar app + Claude Code terminal statusline that separates the *true* tokens-per-second of each response from first-token latency — the number that actually fluctuates.
+> Fork of [JuDaXia/claude-speed](https://github.com/JuDaXia/claude-speed) that adds a **Windows tray app**, **WSL support** (Windows tray merges WSL sessions), and an **embed mode** for existing statusline scripts. Measurement algorithm and METRIC spec are unchanged.
+
+**See your coding agents' real generation speed.** A macOS menu bar app / Windows tray app + Claude Code terminal statusline that separates the *true* tokens-per-second of each response from first-token latency — the number that actually fluctuates.
 
 [中文文档 →](README.zh.md)
 
@@ -33,7 +35,8 @@ claude-speed fits `duration ≈ TTFT + tokens / TPS` across your recent response
 | File | What it does |
 |---|---|
 | `collect.py` | Core collector: scans active Claude Code, Codex CLI, Kimi Code and OpenCode sessions, then prints menu bar title + dropdown lines |
-| `main.swift` → `ClaudeSpeed` | Menu bar app (zero dependencies, compiled directly with `swiftc`), refreshes every 3s |
+| `main.swift` → `ClaudeSpeed` | macOS menu bar app (zero dependencies, compiled directly with `swiftc`), refreshes every 3s |
+| `ClaudeSpeed.ps1` + `install.ps1` | Windows tray app (pure PowerShell / WinForms, zero dependencies), same 3s refresh; can merge WSL sessions via `wsl.exe` |
 | `statusline-speed.py` | [Claude Code statusline](https://docs.anthropic.com/en/docs/claude-code/statusline) script — same math, rendered as one ANSI line under your prompt |
 
 Works with every Claude Code client (CLI, desktop app, VS Code extension) — they all write the same transcripts. The menu bar merges four sources: **Claude Code, Codex CLI, Kimi Code and OpenCode Desktop/CLI** (see *How it works*). OpenCode has no statusline wiring; `--statusline` remains Claude Code-only. All sources are read locally; no network access, nothing leaves your machine.
@@ -58,13 +61,50 @@ Notes:
 - `--statusline` backs up `~/.claude/settings.json` to `.bak` before editing.
 - **Update:** `git pull && ./install.sh` (idempotent — recompiles and restarts).
 
-**Statusline only (any platform, including Linux):** add to `~/.claude/settings.json`:
+**Windows (tray app):** in PowerShell (5.1 or 7), with python 3 on PATH:
+
+```powershell
+git clone https://github.com/szxypi/claude-speed; cd claude-speed
+.\install.ps1                 # tray app + autostart shortcut (shell:startup)
+.\install.ps1 -Statusline     # + wire the Claude Code statusline
+```
+
+A colored circle with the tok/s number appears in the tray (`⚪` idle). Hover for the summary, click for one line per session. `-Python <exe>` picks the interpreter, `-NoAutostart` skips the Startup shortcut, `.\uninstall.ps1` removes everything.
+
+**Windows + WSL (one tray for both):** the tray cannot read WSL transcripts directly (`\\wsl$` is slow and unavailable on some kernels), so it asks the WSL copy to collect and merges the rows:
+
+```powershell
+# clone the repo inside WSL too (e.g. ~/projects/claude-speed), then:
+.\install.ps1 -Remotes 'wsl.exe -e python3 /home/<you>/projects/claude-speed/collect.py --json'
+```
+
+`-Remotes` stores `CLAUDE_SPEED_REMOTES` (user env var, `;`-separated commands). Each command must print `collect.py --json`; remote rows show up as `wsl:project·model`. Remote sessions keep their own slope pool (no cross-host borrowing). A remote that fails or exceeds 8s is silently skipped.
+
+**WSL / Linux (statusline only — no tray under WSLg):**
+
+```bash
+git clone https://github.com/szxypi/claude-speed ~/projects/claude-speed
+~/projects/claude-speed/install.sh --statusline   # replaces ~/.claude/settings.json statusLine (backup .bak)
+```
+
+**Embed into an existing statusline script** (keep your own layout; works on macOS/Linux/WSL/Windows git-bash):
+
+```bash
+# inside your statusline script, $input = the JSON Claude Code piped in
+case "$OSTYPE" in msys*|cygwin*) py=python ;; *) py=python3 ;; esac   # Windows: python3 is the Store stub
+seg=$(printf '%s' "$input" | CLAUDE_SPEED_SEP=" | " "$py" ~/projects/claude-speed/statusline-speed.py --segment)
+[ -n "$seg" ] && line+=" | $seg"
+```
+
+`--segment` prints only the speed parts (`⚡71 tok/s 首字4.2s | 缓存98% | 最近1022tok·22s | 🤖2 Σ40tok/s | ⚠️1错`) — no model name or ctx%, and **nothing at all** when there is no data yet, so the host line never gets an empty slot. `CLAUDE_SPEED_SEP` overrides the separator.
+
+**Statusline only, any platform:** add to `~/.claude/settings.json`:
 
 ```json
 { "statusLine": { "type": "command", "command": "/path/to/claude-speed/statusline-speed.py", "padding": 0 } }
 ```
 
-**Uninstall:** `./uninstall.sh` (removes the LaunchAgent and statusline wiring).
+**Uninstall:** `./uninstall.sh` on macOS/Linux (removes the LaunchAgent and statusline wiring), `.\uninstall.ps1` on Windows (tray, Startup shortcut, statusline wiring, `CLAUDE_SPEED_REMOTES`).
 
 ## Reading the display
 
@@ -118,7 +158,12 @@ swiftc -O -o ClaudeSpeed main.swift
 launchctl kickstart -k gui/$(id -u)/com.claude-speed.menubar
 
 # Test the collector manually
-./collect.py
+./collect.py               # merged view (incl. CLAUDE_SPEED_REMOTES)
+./collect.py --no-remote   # this machine only
+./collect.py --json        # what a remote hands to the tray
+
+# Windows: restart the tray (install.ps1 is idempotent and does exactly this)
+.\install.ps1 -NoAutostart
 ```
 
 Tunables are constants at the top of both Python scripts (thresholds, windows, session count).
@@ -147,7 +192,7 @@ expansion), source adapters (including OpenCode SQLite/WAL parsing and tool-time
 subtraction), end-to-end menu bar scenarios (waiting, errors, cold cache,
 two-stage fit, background subagents and fleet burn proration), and a source-level
 AST check enforcing that the shared algorithm stays byte-identical between
-`collect.py` and `statusline-speed.py`. CI runs them on macOS and Linux plus a
+`collect.py` and `statusline-speed.py`. CI runs them on macOS, Linux and Windows plus a
 `swiftc` smoke build.
 
 ## License
