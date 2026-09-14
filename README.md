@@ -92,11 +92,13 @@ git clone https://github.com/szxypi/claude-speed ~/projects/claude-speed
 ```bash
 # inside your statusline script, $input = the JSON Claude Code piped in
 case "$OSTYPE" in msys*|cygwin*) py=python ;; *) py=python3 ;; esac   # Windows: python3 is the Store stub
-seg=$(printf '%s' "$input" | CLAUDE_SPEED_SEP=" | " "$py" ~/projects/claude-speed/statusline-speed.py --segment)
-[ -n "$seg" ] && line+=" | $seg"
+seg=$(printf '%s' "$input" | CLAUDE_SPEED_SEP=" | " \
+      CLAUDE_SPEED_PALETTE="ok=${green}|warn=${yellow}|bad=${red}|info=${cyan}|dim=${dim}|text=${white}|reset=${reset}" \
+      "$py" ~/projects/claude-speed/statusline-speed.py --segment)
+[ -n "$seg" ] && printf "\n%b" "$seg"      # its own line under your first line
 ```
 
-`--segment` prints only the speed parts (`⚡71 tok/s 首字4.2s | 缓存98% | 最近1022tok·22s | 🤖2 Σ40tok/s | ⚠️1错`) — no model name or ctx%, and **nothing at all** when there is no data yet, so the host line never gets an empty slot. `CLAUDE_SPEED_SEP` overrides the separator.
+`--segment` prints only the speed parts (`⚡71 tok/s 首字4.2s | 缓存98% | 最近1022tok·22s | 🤖2 Σ40tok/s | ⚠️1错`) — no model name or ctx%, and **nothing at all** when there is no data yet, so the host never gets an empty slot. `CLAUDE_SPEED_SEP` overrides the separator; `CLAUDE_SPEED_PALETTE` (`key=escape|key=escape`, keys `ok warn bad info dim text reset`) makes the segment use your script's own colors (truecolor sequences welcome, literal `\033` is fine when you print with `%b`), so the line matches the rest of your statusline.
 
 **Statusline only, any platform:** add to `~/.claude/settings.json`:
 

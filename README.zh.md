@@ -92,11 +92,13 @@ git clone https://github.com/szxypi/claude-speed ~/projects/claude-speed
 ```bash
 # 在你的 statusline 脚本里，$input 是 Claude Code 喂进来的 JSON
 case "$OSTYPE" in msys*|cygwin*) py=python ;; *) py=python3 ;; esac   # Windows 的 python3 是商店占位 stub
-seg=$(printf '%s' "$input" | CLAUDE_SPEED_SEP=" | " "$py" ~/projects/claude-speed/statusline-speed.py --segment)
-[ -n "$seg" ] && line+=" | $seg"
+seg=$(printf '%s' "$input" | CLAUDE_SPEED_SEP=" | " \
+      CLAUDE_SPEED_PALETTE="ok=${green}|warn=${yellow}|bad=${red}|info=${cyan}|dim=${dim}|text=${white}|reset=${reset}" \
+      "$py" ~/projects/claude-speed/statusline-speed.py --segment)
+[ -n "$seg" ] && printf "\n%b" "$seg"      # 单独一行，放在你的第一行下面
 ```
 
-`--segment` 只输出速度片段（`⚡71 tok/s 首字4.2s | 缓存98% | 最近1022tok·22s | 🤖2 Σ40tok/s | ⚠️1错`）——不含模型名与 ctx%，**没有数据时什么都不输出**，宿主行不会出现空槽位。`CLAUDE_SPEED_SEP` 可覆盖分隔符。
+`--segment` 只输出速度片段（`⚡71 tok/s 首字4.2s | 缓存98% | 最近1022tok·22s | 🤖2 Σ40tok/s | ⚠️1错`）——不含模型名与 ctx%，**没有数据时什么都不输出**，宿主不会出现空槽位。`CLAUDE_SPEED_SEP` 覆盖分隔符；`CLAUDE_SPEED_PALETTE`（`键=转义序列|键=转义序列`，键为 `ok warn bad info dim text reset`）让片段直接用你脚本自己的颜色（truecolor 序列可用，用 `%b` 输出时写字面 `\033` 也行），与状态栏其余部分风格一致。
 
 **只用 statusline（任何平台，含 Linux）：** 在 `~/.claude/settings.json` 加：
 

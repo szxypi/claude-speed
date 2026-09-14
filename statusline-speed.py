@@ -254,44 +254,58 @@ def speed_parts(info, now):
     if fit is None:
         if groups:  # 有响应但样本不足以拆分:只报最近一条的规模,不虚报速度
             g = groups[-1]
-            parts.append("\033[2m速度样本不足\033[0m 最近%dtok·%.0fs"
-                         % (g["out"], g["end"] - g["start"]))
+            parts.append(paint("dim", "⚡速度样本不足") + " " +
+                         paint("text", "最近%dtok·%.0fs" % (g["out"], g["end"] - g["start"])))
     else:
         tps, ttft = fit
         # 纯生成速度阈值(已剥离 TTFT): 绿≥50 黄≥30 红<30
         if ttft is None:
             # 回退近似是下界:下界过绿线才敢亮绿,否则暗色显示「不确定」
-            sc = "32" if tps >= 50 else "2"
-            parts.append("\033[%sm⚡≥%.0f tok/s\033[0m" % (sc, tps))
+            parts.append(paint("ok" if tps >= 50 else "dim", "⚡≥%.0f tok/s" % tps))
         else:  # 首字延迟阈值: 绿≤5s 黄≤12s 红>12s
-            sc = "32" if tps >= 50 else ("33" if tps >= 30 else "31")
-            tc = "32" if ttft <= 5 else ("33" if ttft <= 12 else "31")
-            seg = ("\033[%sm⚡%.0f tok/s\033[0m \033[%sm首字%.1fs\033[0m"
-                   % (sc, tps, tc, ttft))
+            sk = "ok" if tps >= 50 else ("warn" if tps >= 30 else "bad")
+            tk = "ok" if ttft <= 5 else ("warn" if ttft <= 12 else "bad")
+            seg = (paint(sk, "⚡%.0f tok/s" % tps) + " " +
+                   paint(tk, "首字%.1fs" % ttft))
             if win and win > FIT_WINDOW_START:  # 扩窗才标口径,常态不占宽
-                seg += "\033[2m·近%d分\033[0m" % round(win / 60)
+                seg += paint("dim", "·近%d分" % round(win / 60))
             parts.append(seg)
         g = groups[-1]
         denom = g["inp"] + g["cr"] + g["cc"]
         if denom > 0:
             hit = 100.0 * g["cr"] / denom
-            hc = "32" if hit >= 100 * CACHE_OK else ("33" if hit >= 50 else "31")
-            parts.append("\033[%sm缓存%.0f%%%s\033[0m"
-                         % (hc, hit, "冷" if g["cc"] > g["cr"] else ""))
-        parts.append("最近%dtok·%.0fs" % (g["out"], g["end"] - g["start"]))
+            hk = "ok" if hit >= 100 * CACHE_OK else ("warn" if hit >= 50 else "bad")
+            parts.append(paint(hk, "缓存%.0f%%%s" % (hit, "冷" if g["cc"] > g["cr"] else "")))
+        parts.append(paint("text", "最近%dtok·%.0fs" % (g["out"], g["end"] - g["start"])))
 
     n_ag, burn, _ = agent_metrics(subagent_paths(info.get("transcript_path")), now)
     if n_ag:  # 后台子代理在跑:代理数 + 舰队燃烧率
-        parts.append("\033[36m🤖%d Σ%.0ftok/s\033[0m" % (n_ag, burn))
+        parts.append(paint("info", "🤖%d Σ%.0ftok/s" % (n_ag, burn)))
 
     nerr = sum(1 for e in err_ts if now - e <= ERR_ROW_WINDOW)
     if nerr:
-        parts.append("\033[31m⚠️%d错\033[0m" % nerr)
+        parts.append(paint("bad", "⚠️%d错" % nerr))
     return parts
 
 
 # 片段分隔符;嵌入宿主状态栏时可用 CLAUDE_SPEED_SEP 对齐宿主风格(如 " │ ")
 SEP = os.environ.get("CLAUDE_SPEED_SEP") or " \033[2m|\033[0m "
+
+# 调色板:默认 ANSI 16 色;嵌入时宿主可用 CLAUDE_SPEED_PALETTE 传自己的序列
+# (键=值,以 | 分隔,值原样使用,如 "ok=\033[38;2;0;175;80m|dim=\033[2m")。
+# 值里允许写字面 \033(宿主用 printf %b 输出时再转义),也允许真 ESC 字符。
+PALETTE = {"ok": "\033[32m", "warn": "\033[33m", "bad": "\033[31m",
+           "info": "\033[36m", "dim": "\033[2m", "text": "", "reset": "\033[0m"}
+for _kv in (os.environ.get("CLAUDE_SPEED_PALETTE") or "").split("|"):
+    _k, _sep, _v = _kv.partition("=")
+    if _sep and _k.strip() in PALETTE:
+        PALETTE[_k.strip()] = _v
+
+
+def paint(key, text):
+    """按调色板着色;text 键(正文色)为空时不包裹,免得多余的 reset。"""
+    c = PALETTE.get(key, "")
+    return c + text + PALETTE["reset"] if c else text
 
 
 def main(argv=None):
@@ -312,15 +326,15 @@ def main(argv=None):
     parts = []
     model = ((info.get("model") or {}).get("display_name") or "").strip()
     if model:
-        parts.append("\033[1m%s\033[0m" % model)
+        parts.append("\033[1m%s\033[0m" % model)  # 独立模式下模型名加粗
     parts.extend(speed_parts(info, now))
     api_ms = (info.get("cost") or {}).get("total_api_duration_ms")
     if api_ms:
         parts.append("API %s" % fmt_dur(api_ms))
     pct = (info.get("context_window") or {}).get("used_percentage")
     if pct is not None:
-        cc = "31" if pct >= 85 else ("33" if pct >= 60 else "0")
-        parts.append("\033[%smctx %.0f%%\033[0m" % (cc, pct))
+        ck = "bad" if pct >= 85 else ("warn" if pct >= 60 else "text")
+        parts.append(paint(ck, "ctx %.0f%%" % pct))
 
     print(SEP.join(parts) if parts else "⚡ 暂无速度数据")
 
